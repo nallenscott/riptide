@@ -110,5 +110,48 @@ module Riptide
 
       refute @store.empty?
     end
+
+    def test_prune_except_removes_tests_not_in_the_known_set
+      @store.record(
+        class_name: "ProviderTest", method_name: "test_a",
+        coverage: { "app/models/provider.rb" => Set[1] },
+        blob_shas: { "app/models/provider.rb" => "sha-a" }
+      )
+      @store.record(
+        class_name: "ProviderTest", method_name: "test_b",
+        coverage: { "app/models/provider.rb" => Set[2] },
+        blob_shas: { "app/models/provider.rb" => "sha-a" }
+      )
+
+      @store.prune_except([["ProviderTest", "test_a"]])
+
+      deps = @store.dependencies_for_file("app/models/provider.rb")
+      assert_equal [["ProviderTest", "test_a"]], deps.map { |d| [d[:class_name], d[:method_name]] }
+    end
+
+    def test_prune_except_also_removes_the_pruned_tests_dependency_rows
+      @store.record(
+        class_name: "ProviderTest", method_name: "test_a",
+        coverage: { "app/models/provider.rb" => Set[1], "app/models/other.rb" => Set[5] },
+        blob_shas: { "app/models/provider.rb" => "sha-a", "app/models/other.rb" => "sha-b" }
+      )
+
+      @store.prune_except([])
+
+      assert_empty @store.dependencies_for_file("app/models/provider.rb")
+      assert_empty @store.dependencies_for_file("app/models/other.rb")
+    end
+
+    def test_prune_except_keeps_everything_when_nothing_is_stale
+      @store.record(
+        class_name: "ProviderTest", method_name: "test_a",
+        coverage: { "app/models/provider.rb" => Set[1] },
+        blob_shas: { "app/models/provider.rb" => "sha-a" }
+      )
+
+      @store.prune_except([["ProviderTest", "test_a"]])
+
+      assert_equal 1, @store.dependencies_for_file("app/models/provider.rb").size
+    end
   end
 end

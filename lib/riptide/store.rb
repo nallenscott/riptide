@@ -3,6 +3,7 @@
 require "sqlite3"
 require "json"
 require "fileutils"
+require "set"
 
 module Riptide
   class Store
@@ -85,6 +86,27 @@ module Riptide
     # database is a bootstrap case rather than an empty-but-known map.
     def empty?
       @db.execute("SELECT COUNT(*) FROM tests").first.first.zero?
+    end
+
+    # Deletes every recorded test not in +known_tests+, an Enumerable of
+    # [class_name, method_name] pairs, along with its dependency rows.
+    # +known_tests+ has to be the full, current set of tests the caller can
+    # see, a scoped or partial list here would prune tests that still
+    # exist, just weren't in view.
+    def prune_except(known_tests)
+      known = known_tests.to_set
+
+      stale_ids = @db.execute("SELECT id, class_name, method_name FROM tests").filter_map do |id, class_name, method_name|
+        id unless known.include?([class_name, method_name])
+      end
+      return if stale_ids.empty?
+
+      @db.transaction do
+        stale_ids.each do |id|
+          @db.execute("DELETE FROM test_dependencies WHERE test_id = ?", [id])
+          @db.execute("DELETE FROM tests WHERE id = ?", [id])
+        end
+      end
     end
 
     private

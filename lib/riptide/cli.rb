@@ -30,12 +30,30 @@ module Riptide
 
     def run_command
       store = Store.new(path: File.join(@root, Riptide.configuration.db_path))
-      decision = store.empty? ? bootstrap_decision : compute_decision(store)
 
+      # Loading test files first, before deciding anything, is what gives
+      # prune_deleted_tests real, current ground truth: Minitest discovers
+      # every test class the moment its file is required, regardless of
+      # what later gets filtered down to run, confirmed directly against
+      # Minitest's own -n filtering behavior.
+      load_test_files
+      prune_deleted_tests(store)
+
+      decision = store.empty? ? bootstrap_decision : compute_decision(store)
       report(decision)
 
-      load_test_files
       Runner.new(decision: decision).apply
+    end
+
+    def prune_deleted_tests(store)
+      # methods_matching, not runnable_methods: the latter sorts/shuffles
+      # based on Minitest.seed, which isn't set yet this early, before
+      # Minitest.run's own arg parsing has run. Pruning only needs the raw
+      # set of test names, not run order.
+      known = Minitest::Runnable.runnables.flat_map do |klass|
+        klass.methods_matching(/^test_/).map { |method| [klass.name, method] }
+      end
+      store.prune_except(known)
     end
 
     def bootstrap_decision
