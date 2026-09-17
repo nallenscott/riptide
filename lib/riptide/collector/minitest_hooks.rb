@@ -15,6 +15,26 @@ module Riptide
         attr_accessor :on_capture, :root
       end
 
+      # Configures capture to persist into +store+, rooted at +root+.
+      # Called by the Minitest plugin (lib/minitest/riptide_plugin.rb),
+      # the one place this gets wired for a real run.
+      #
+      # Deliberately does not include this module into Minitest::Test.
+      # This method also gets called directly from riptide's own unit
+      # tests to check the wiring itself, and Minitest::Test.include is a
+      # global, irreversible mutation for the rest of the process, doing
+      # it here once broke every other test in this gem's own suite that
+      # ran afterward. The plugin is the only place that calls include.
+      def self.wire(store:, root:)
+        self.root = root
+        self.on_capture = lambda do |class_name, method_name, coverage|
+          next if coverage.empty?
+
+          blob_shas = coverage.keys.to_h { |file| [file, Diff.blob_sha(File.join(root, file))] }
+          store.record(class_name: class_name, method_name: method_name, coverage: coverage, blob_shas: blob_shas)
+        end
+      end
+
       def after_setup
         super
         @riptide_collector = Collector.new(root: MinitestHooks.root || Dir.pwd)

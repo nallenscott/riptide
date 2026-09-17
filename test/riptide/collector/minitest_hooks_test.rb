@@ -6,6 +6,37 @@ require "tmpdir"
 module Riptide
   class Collector
     class MinitestHooksTest < Minitest::Test
+      include GitFixture
+
+      def teardown
+        MinitestHooks.root = nil
+        MinitestHooks.on_capture = nil
+      end
+
+      def test_wire_persists_coverage_with_the_files_current_blob_sha
+        in_repo do |root|
+          write_and_commit(root, "app/models/widget.rb", "class Widget\nend\n", message: "base")
+          store = Store.new(path: ":memory:")
+
+          MinitestHooks.wire(store: store, root: root)
+          MinitestHooks.on_capture.call("WidgetTest", "test_a", { "app/models/widget.rb" => Set[1] })
+
+          deps = store.dependencies_for_file("app/models/widget.rb")
+
+          assert_equal 1, deps.size
+          assert_equal Diff.blob_sha(File.join(root, "app/models/widget.rb")), deps.first[:source_blob_sha]
+        end
+      end
+
+      def test_wire_skips_tests_with_empty_coverage
+        store = Store.new(path: ":memory:")
+        MinitestHooks.wire(store: store, root: Dir.pwd)
+
+        MinitestHooks.on_capture.call("EmptyTest", "test_a", {})
+
+        assert_empty store.dependencies_for_file("anything.rb")
+      end
+
       def test_captures_only_the_lines_touched_by_each_tests_own_body
         Dir.mktmpdir do |root|
           fixture = File.join(root, "widget.rb")
@@ -43,9 +74,6 @@ module Riptide
           Minitest::Runnable.runnables.delete(fixture_class)
           Object.send(:remove_const, :MinitestHooksFixtureTest) if defined?(MinitestHooksFixtureTest)
         end
-      ensure
-        MinitestHooks.root = nil
-        MinitestHooks.on_capture = nil
       end
 
       private

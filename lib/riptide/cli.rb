@@ -35,7 +35,7 @@ module Riptide
       report(decision)
 
       load_test_files
-      Runner.new(decision: decision, store: store, root: @root).apply
+      Runner.new(decision: decision).apply
     end
 
     def bootstrap_decision
