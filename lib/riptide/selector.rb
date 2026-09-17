@@ -1,12 +1,23 @@
 # frozen_string_literal: true
 
+require "set"
+
 module Riptide
   class Selector
     Decision = Struct.new(:mode, :reason, :selected, keyword_init: true)
 
-    def initialize(store:, root: Dir.pwd)
+    # +discovered_tests_by_file+ is { relative_path => [[class_name, method_name], ...] },
+    # every test method Minitest currently knows about, grouped by the file
+    # it's actually defined in (via Method#source_location, not a naming
+    # convention). Without it, a test method Store has never recorded
+    # (a brand new test file, or a new method added to an existing one)
+    # never gets selected at all: it has no dependency rows to diff
+    # against, and isn't "modified" content Store already tracks, so it
+    # silently never runs.
+    def initialize(store:, root: Dir.pwd, discovered_tests_by_file: {})
       @store = store
       @root = root
+      @discovered_tests_by_file = discovered_tests_by_file
     end
 
     # Decides what to run for the changes between +base+ and +head+.
@@ -20,12 +31,33 @@ module Riptide
       return Decision.new(mode: :full, reason: full_suite_reason, selected: []) if full_suite_reason
 
       selected = {}
-      changed.each { |file| accumulate_selection(file, selected) }
+      changed.each do |file|
+        accumulate_selection(file, selected)
+        add_undiscovered_tests(file, selected)
+      end
 
       Decision.new(mode: :selected, reason: nil, selected: selected.values)
     end
 
     private
+
+    # Any test currently defined in +file+ that Store has never recorded
+    # coverage for gets selected outright, regardless of the file's diff
+    # status. A test already known to Store is left to accumulate_selection's
+    # precise line-diffing instead of being re-selected unconditionally here.
+    def add_undiscovered_tests(file, selected)
+      tests_in_file = @discovered_tests_by_file[file[:path]] || []
+      return if tests_in_file.empty?
+
+      known = @store.dependencies_for_file(file[:path]).map { |d| [d[:class_name], d[:method_name]] }.to_set
+
+      tests_in_file.each do |class_name, method_name|
+        next if known.include?([class_name, method_name])
+
+        remember(selected, { class_name: class_name, method_name: method_name },
+                 "#{file[:path]} has no recorded coverage for this test yet")
+      end
+    end
 
     # A file that matches a global fallback pattern always forces a full
     # run. A file that already existed and was touched, modified, deleted,

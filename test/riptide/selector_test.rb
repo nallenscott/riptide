@@ -103,7 +103,72 @@ module Riptide
       end
     end
 
+    def test_a_new_test_method_in_a_modified_file_gets_selected_even_with_no_history
+      in_repo do |root|
+        write_and_commit(root, "test/models/provider_test.rb", provider_test_source, message: "base")
+        base_sha = Diff.blob_sha(File.join(root, "test/models/provider_test.rb"))
+        @store.record(
+          class_name: "ProviderTest", method_name: "test_a",
+          coverage: { "test/models/provider_test.rb" => Set[2, 3, 4] },
+          blob_shas: { "test/models/provider_test.rb" => base_sha }
+        )
+
+        write_and_commit(root, "test/models/provider_test.rb", provider_test_source_with_new_method, message: "add test_b")
+
+        discovered = { "test/models/provider_test.rb" => [%w[ProviderTest test_a], %w[ProviderTest test_b]] }
+        decision = Selector.new(store: @store, root: root, discovered_tests_by_file: discovered)
+                            .select(base: "HEAD~1", head: "HEAD")
+
+        assert_equal :selected, decision.mode
+        assert_includes decision.selected.map { |s| [s[:class_name], s[:method_name]] }, ["ProviderTest", "test_b"]
+      end
+    end
+
+    def test_an_already_known_test_does_not_get_redundantly_selected_by_discovery
+      in_repo do |root|
+        write_and_commit(root, "app/models/provider.rb", provider_source, message: "base")
+        base_sha = Diff.blob_sha(File.join(root, "app/models/provider.rb"))
+        @store.record(
+          class_name: "ProviderTest", method_name: "test_a",
+          coverage: { "app/models/provider.rb" => Set[2, 3, 4] },
+          blob_shas: { "app/models/provider.rb" => base_sha }
+        )
+        write_and_commit(root, "app/models/other.rb", "class Other\nend\n", message: "unrelated")
+
+        discovered = { "app/models/provider.rb" => [%w[ProviderTest test_a]] }
+        decision = Selector.new(store: @store, root: root, discovered_tests_by_file: discovered)
+                            .select(base: "HEAD~1", head: "HEAD")
+
+        assert_equal :selected, decision.mode
+        assert_empty decision.selected
+      end
+    end
+
     private
+
+    def provider_test_source
+      <<~RUBY
+        class ProviderTest < Minitest::Test
+          def test_a
+            assert true
+          end
+        end
+      RUBY
+    end
+
+    def provider_test_source_with_new_method
+      <<~RUBY
+        class ProviderTest < Minitest::Test
+          def test_a
+            assert true
+          end
+
+          def test_b
+            assert true
+          end
+        end
+      RUBY
+    end
 
     def provider_source
       <<~RUBY

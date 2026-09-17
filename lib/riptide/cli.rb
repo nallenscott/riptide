@@ -32,28 +32,36 @@ module Riptide
       store = Store.new(path: File.join(@root, Riptide.configuration.db_path))
 
       # Loading test files first, before deciding anything, is what gives
-      # prune_deleted_tests real, current ground truth: Minitest discovers
-      # every test class the moment its file is required, regardless of
-      # what later gets filtered down to run, confirmed directly against
-      # Minitest's own -n filtering behavior.
+      # discovered_tests_by_file real, current ground truth: Minitest
+      # discovers every test class the moment its file is required,
+      # regardless of what later gets filtered down to run, confirmed
+      # directly against Minitest's own -n filtering behavior.
       load_test_files
-      prune_deleted_tests(store)
+      discovered = discovered_tests_by_file
+      store.prune_except(discovered.values.flatten(1))
 
-      decision = store.empty? ? bootstrap_decision : compute_decision(store)
+      decision = store.empty? ? bootstrap_decision : compute_decision(store, discovered)
       report(decision)
 
       Runner.new(decision: decision).apply
     end
 
-    def prune_deleted_tests(store)
-      # methods_matching, not runnable_methods: the latter sorts/shuffles
-      # based on Minitest.seed, which isn't set yet this early, before
-      # Minitest.run's own arg parsing has run. Pruning only needs the raw
-      # set of test names, not run order.
-      known = Minitest::Runnable.runnables.flat_map do |klass|
-        klass.methods_matching(/^test_/).map { |method| [klass.name, method] }
+    # { relative_path => [[class_name, method_name], ...] }, every test
+    # method Minitest currently knows about, grouped by the file it's
+    # actually defined in via Method#source_location, not a naming
+    # convention. methods_matching, not runnable_methods: the latter
+    # sorts/shuffles based on Minitest.seed, which isn't set yet this
+    # early, before Minitest.run's own arg parsing has run, and neither
+    # pruning nor selection needs run order, just the raw set of names.
+    def discovered_tests_by_file
+      Minitest::Runnable.runnables.each_with_object(Hash.new { |h, k| h[k] = [] }) do |klass, mapping|
+        klass.methods_matching(/^test_/).each do |method|
+          file = klass.instance_method(method).source_location&.first
+          next unless file
+
+          mapping[file.delete_prefix("#{@root}/")] << [klass.name, method]
+        end
       end
-      store.prune_except(known)
     end
 
     def bootstrap_decision
@@ -62,10 +70,10 @@ module Riptide
       Selector::Decision.new(mode: :full, reason: "no dependency map yet", selected: [])
     end
 
-    def compute_decision(store)
+    def compute_decision(store, discovered)
       base = default_base
       puts "Comparing HEAD against #{base}"
-      Selector.new(store: store, root: @root).select(base: base)
+      Selector.new(store: store, root: @root, discovered_tests_by_file: discovered).select(base: base)
     end
 
     # Merge-base against origin/<main_branch> when that ref exists, the
