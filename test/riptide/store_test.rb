@@ -153,5 +153,18 @@ module Riptide
 
       assert_equal 1, @store.dependencies_for_file("app/models/provider.rb").size
     end
+
+    def test_reset_wipes_every_test_and_dependency_row
+      @store.record(
+        class_name: "ProviderTest", method_name: "test_a",
+        coverage: { "app/models/provider.rb" => Set[1] },
+        blob_shas: { "app/models/provider.rb" => "sha-a" }
+      )
+
+      @store.reset!
+
+      assert @store.empty?
+      assert_empty @store.dependencies_for_file("app/models/provider.rb")
+    end
   end
 end

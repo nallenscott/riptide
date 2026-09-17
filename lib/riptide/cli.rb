@@ -17,7 +17,10 @@ module Riptide
       when "run", nil
         run_command
         nil
-      when "plan", "why", "rebuild"
+      when "rebuild"
+        rebuild_command
+        nil
+      when "plan", "why"
         warn "riptide #{command}: not yet implemented"
         1
       else
@@ -29,13 +32,22 @@ module Riptide
     private
 
     def run_command
-      store = Store.new(path: File.join(@root, Riptide.configuration.db_path))
+      perform_run(Store.new(path: File.join(@root, Riptide.configuration.db_path)))
+    end
 
-      # Loading test files first, before deciding anything, is what gives
-      # discovered_tests_by_file real, current ground truth: Minitest
-      # discovers every test class the moment its file is required,
-      # regardless of what later gets filtered down to run, confirmed
-      # directly against Minitest's own -n filtering behavior.
+    def rebuild_command
+      store = Store.new(path: File.join(@root, Riptide.configuration.db_path))
+      puts "Rebuilding dependency map from scratch..."
+      store.reset!
+      perform_run(store)
+    end
+
+    # Loading test files first, before deciding anything, is what gives
+    # discovered_tests_by_file real, current ground truth: Minitest
+    # discovers every test class the moment its file is required,
+    # regardless of what later gets filtered down to run, confirmed
+    # directly against Minitest's own -n filtering behavior.
+    def perform_run(store)
       load_test_files
       discovered = discovered_tests_by_file
       store.prune_except(discovered.values.flatten(1))

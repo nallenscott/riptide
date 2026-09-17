@@ -88,6 +88,16 @@ module Riptide
       @db.execute("SELECT COUNT(*) FROM tests").first.first.zero?
     end
 
+    # Wipes every recorded test and its dependency rows, forcing the next
+    # run back into the bootstrap path. Schema stays intact, nothing needs
+    # recreating.
+    def reset!
+      @db.transaction do
+        @db.execute("DELETE FROM test_dependencies")
+        @db.execute("DELETE FROM tests")
+      end
+    end
+
     # Deletes every recorded test not in +known_tests+, an Enumerable of
     # [class_name, method_name] pairs, along with its dependency rows.
     # +known_tests+ has to be the full, current set of tests the caller can
