@@ -24,5 +24,6 @@ Gem::Specification.new do |spec|
   spec.executables = ["riptide"]
   spec.require_paths = ["lib"]
 
+  spec.add_dependency "minitest", ">= 5.0"
   spec.add_dependency "sqlite3", "~> 2.0"
 end

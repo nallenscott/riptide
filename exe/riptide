@@ -1,3 +1,6 @@
 #!/usr/bin/env ruby
 
 require "riptide"
+
+result = Riptide::CLI.new(ARGV).call
+exit(result) if result

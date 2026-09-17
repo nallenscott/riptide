@@ -24,6 +24,47 @@ module Riptide
       out
     end
 
+    # Files that differ between +base+ and +head+, with rename detection
+    # enabled: [{ path:, status: :added|:modified|:deleted|:renamed, old_path: }, ...].
+    # Rename detection is similarity-based, not guaranteed. A rename bundled
+    # with a large enough edit on a small enough file can fall back to a
+    # plain delete plus add instead of a single :renamed entry.
+    def changed_files(base, head)
+      out, err, status = Open3.capture3("git", "diff", "--name-status", "-M", base, head)
+      raise Error, "git diff --name-status #{base} #{head} failed: #{err.strip}" unless status.success?
+
+      out.each_line.map do |line|
+        code, *paths = line.chomp.split("\t")
+
+        case code[0]
+        when "A" then { path: paths[0], status: :added }
+        when "D" then { path: paths[0], status: :deleted }
+        when "R" then { path: paths[1], status: :renamed, old_path: paths[0] }
+        else { path: paths[0], status: :modified }
+        end
+      end
+    end
+
+    # The commit where +ref+ and HEAD diverged, git's own definition of a
+    # sensible diff base for a feature branch.
+    def merge_base(ref)
+      out, err, status = Open3.capture3("git", "merge-base", "HEAD", ref)
+      raise Error, "git merge-base HEAD #{ref} failed: #{err.strip}" unless status.success?
+
+      out.strip
+    end
+
+    # The git blob hash of +path+'s current on-disk content, independent of
+    # whether it's staged or committed. Comparable to blob hashes recorded
+    # earlier for the same path, to tell whether it has changed at all since
+    # Store last saw it.
+    def blob_sha(path)
+      out, err, status = Open3.capture3("git", "hash-object", path)
+      raise Error, "git hash-object #{path} failed: #{err.strip}" unless status.success?
+
+      out.strip
+    end
+
     # Parses `@@ -a,b +c,d @@` headers out of unified diff text, ordered by
     # position in the old file.
     def hunks(diff_text)
