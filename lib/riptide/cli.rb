@@ -20,7 +20,10 @@ module Riptide
       when "rebuild"
         rebuild_command
         nil
-      when "plan", "why"
+      when "plan"
+        plan_command
+        nil
+      when "why"
         warn "riptide #{command}: not yet implemented"
         1
       else
@@ -32,23 +35,24 @@ module Riptide
     private
 
     def run_command
-      perform_run(Store.new(path: store_path))
+      perform_run(Store.new(path: Riptide.configuration.store_path))
     end
 
     def rebuild_command
-      store = Store.new(path: store_path)
+      store = Store.new(path: Riptide.configuration.store_path)
       puts "Rebuilding dependency map from scratch..."
       store.reset!
       perform_run(store)
     end
 
-    # db_path is usually relative to the host app's root, but doesn't have
-    # to be: a CI container that only bind-mounts one specific directory
-    # back to the host (e.g. /workspace) needs the map to land there
-    # directly, which isn't under the app's own root at all.
-    def store_path
-      path = Riptide.configuration.db_path
-      File.absolute_path?(path) ? path : File.join(@root, path)
+    # Same decision-making as run, stops before Runner ever touches
+    # anything, nothing gets filtered or executed.
+    def plan_command
+      store = Store.new(path: Riptide.configuration.store_path)
+      load_test_files
+      discovered = discovered_tests_by_file
+      decision = store.empty? ? bootstrap_decision : compute_decision(store, discovered)
+      report(decision)
     end
 
     # Loading test files first, before deciding anything, is what gives

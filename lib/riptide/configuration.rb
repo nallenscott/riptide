@@ -2,8 +2,12 @@
 
 module Riptide
   class Configuration
-    # Path to the SQLite dependency map, relative to the host app's root.
-    attr_accessor :db_path
+    # Where the Store keeps its dependency map. Relative paths resolve
+    # against wherever the process is running (the host app's root, in any
+    # real invocation); can also be absolute, for an environment that only
+    # persists one specific directory across runs (e.g. a CI container
+    # that bind-mounts /workspace back to the host).
+    attr_accessor :store_path
 
     # Changing any of these always selects the full suite, regardless of
     # what Store knows, since they can affect app-wide behavior in ways
@@ -27,8 +31,15 @@ module Riptide
     # rather than requiring riptide to know about it structurally.
     attr_accessor :test_exclude_patterns
 
+    # When true, the Minitest plugin computes and prints what it would
+    # select for the current diff, using whatever Minitest already
+    # discovered in this process, same underlying Selector the plan CLI
+    # command uses, just handed its inputs a different way. Never filters
+    # or skips anything either way, this only ever prints.
+    attr_accessor :dry_run
+
     def initialize
-      @db_path = "tmp/riptide/riptide.db"
+      @store_path = "tmp/riptide/riptide.db"
       @global_fallback_patterns = %w[
         Gemfile
         Gemfile.lock
@@ -41,6 +52,7 @@ module Riptide
       @test_helper_path = "test/test_helper.rb"
       @test_glob = "test/**/*_test.rb"
       @test_exclude_patterns = []
+      @dry_run = false
     end
   end
 end

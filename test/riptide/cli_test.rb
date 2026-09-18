@@ -7,7 +7,7 @@ module Riptide
     include GitFixture
 
     def test_call_returns_an_error_for_a_not_yet_implemented_command
-      _, err = capture_io { assert_equal 1, CLI.new(["plan"]).call }
+      _, err = capture_io { assert_equal 1, CLI.new(["why"]).call }
 
       assert_match(/not yet implemented/, err)
     end
@@ -38,22 +38,6 @@ module Riptide
       end
     end
 
-    def test_store_path_joins_a_relative_db_path_to_root
-      Riptide.configuration.db_path = "tmp/riptide/riptide.db"
-
-      assert_equal "/app/tmp/riptide/riptide.db", CLI.new([], root: "/app").send(:store_path)
-    ensure
-      Riptide.configuration.db_path = "tmp/riptide/riptide.db"
-    end
-
-    def test_store_path_leaves_an_absolute_db_path_untouched
-      Riptide.configuration.db_path = "/workspace/riptide.db"
-
-      assert_equal "/workspace/riptide.db", CLI.new([], root: "/app").send(:store_path)
-    ensure
-      Riptide.configuration.db_path = "tmp/riptide/riptide.db"
-    end
-
     def test_load_test_files_skips_files_matching_test_exclude_patterns
       Dir.mktmpdir do |root|
         FileUtils.mkdir_p(File.join(root, "test/controllers"))
@@ -79,6 +63,31 @@ module Riptide
 
           Minitest::Runnable.runnables.delete(Object.const_get(const))
           Object.send(:remove_const, const)
+        end
+      end
+    end
+
+    def test_plan_command_reports_a_decision_without_touching_runnable_methods
+      in_repo do |root|
+        write_and_commit(root, "test/test_helper.rb", "require 'minitest/autorun'\n", message: "base")
+        write_and_commit(root, "test/models/plan_fixture_test.rb", <<~RUBY, message: "add test")
+          require "test_helper"
+          Object.const_set(:CLIPlanFixtureTest, Class.new(Minitest::Test) { def test_a; end })
+        RUBY
+
+        Riptide.configuration.test_glob = "test/models/**/*_test.rb"
+        Riptide.configuration.store_path = File.join(root, "tmp", "riptide.db")
+
+        out, = capture_io { CLI.new(["plan"], root: root).send(:plan_command) }
+
+        assert_match(/No dependency map found/, out)
+        assert_equal ["test_a"], CLIPlanFixtureTest.runnable_methods
+      ensure
+        Riptide.configuration.test_glob = "test/**/*_test.rb"
+        Riptide.configuration.store_path = "tmp/riptide/riptide.db"
+        if defined?(CLIPlanFixtureTest)
+          Minitest::Runnable.runnables.delete(CLIPlanFixtureTest)
+          Object.send(:remove_const, :CLIPlanFixtureTest)
         end
       end
     end

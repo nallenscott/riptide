@@ -19,10 +19,47 @@ require "riptide"
 module Minitest
   def self.plugin_riptide_init(_options)
     root = Dir.pwd
-    store = Riptide::Store.new(path: File.join(root, Riptide.configuration.db_path))
+    store = Riptide::Store.new(path: Riptide.configuration.store_path)
 
     Riptide::Collector::MinitestHooks.wire(store: store, root: root)
     Minitest::Test.include(Riptide::Collector::MinitestHooks)
+
+    riptide_dry_run(store, root) if Riptide.configuration.dry_run
+  end
+
+  # Same decision-making as Riptide::CLI's plan command, Selector is the
+  # shared piece, but gathers its own inputs instead of going through CLI:
+  # by the time this hook fires, Minitest has already discovered every
+  # test in this process, so there's nothing to boot or load a second
+  # time. Never filters or skips anything, only prints.
+  def self.riptide_dry_run(store, root)
+    if store.empty?
+      puts "[riptide] plan: no dependency map yet"
+      return
+    end
+
+    discovered = Minitest::Runnable.runnables.each_with_object(Hash.new { |h, k| h[k] = [] }) do |klass, mapping|
+      klass.methods_matching(/^test_/).each do |method|
+        file = klass.instance_method(method).source_location&.first
+        mapping[file.delete_prefix("#{root}/")] << [klass.name, method] if file
+      end
+    end
+
+    base = begin
+      Riptide::Diff.merge_base("origin/#{Riptide.configuration.main_branch}")
+    rescue Riptide::Error
+      Riptide.configuration.main_branch
+    end
+
+    decision = Riptide::Selector.new(store: store, root: root, discovered_tests_by_file: discovered).select(base: base)
+
+    case decision.mode
+    when :full
+      puts "[riptide] plan vs #{base}: full suite (#{decision.reason})"
+    when :selected
+      total = discovered.values.flatten(1).size
+      puts "[riptide] plan vs #{base}: #{decision.selected.size}/#{total} tests"
+    end
   end
 
   register_plugin(:riptide)
