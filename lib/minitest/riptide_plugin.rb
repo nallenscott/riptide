@@ -17,7 +17,17 @@ require "riptide"
 # and 6.x, confirmed directly against both, so this needs nothing
 # version-specific.
 module Minitest
+  # Some apps' own boot chains call Minitest.autorun more than once (Rails
+  # itself does: rails/test_help requires active_support/testing/autorun,
+  # which calls Minitest.autorun directly, independent of any earlier
+  # minitest/autorun require), so Minitest.run, and this hook, can fire
+  # more than once in a single process even though the actual test suite
+  # only ever executes once. Guard against wiring/printing twice.
   def self.plugin_riptide_init(_options)
+    return if @riptide_initialized
+
+    @riptide_initialized = true
+
     root = Dir.pwd
     store = Riptide::Store.new(path: Riptide.configuration.store_path)
 
