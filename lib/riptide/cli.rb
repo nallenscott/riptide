@@ -32,14 +32,23 @@ module Riptide
     private
 
     def run_command
-      perform_run(Store.new(path: File.join(@root, Riptide.configuration.db_path)))
+      perform_run(Store.new(path: store_path))
     end
 
     def rebuild_command
-      store = Store.new(path: File.join(@root, Riptide.configuration.db_path))
+      store = Store.new(path: store_path)
       puts "Rebuilding dependency map from scratch..."
       store.reset!
       perform_run(store)
+    end
+
+    # db_path is usually relative to the host app's root, but doesn't have
+    # to be: a CI container that only bind-mounts one specific directory
+    # back to the host (e.g. /workspace) needs the map to land there
+    # directly, which isn't under the app's own root at all.
+    def store_path
+      path = Riptide.configuration.db_path
+      File.absolute_path?(path) ? path : File.join(@root, path)
     end
 
     # Loading test files first, before deciding anything, is what gives
@@ -116,7 +125,11 @@ module Riptide
       $LOAD_PATH.unshift(@root, test_dir)
 
       require File.join(@root, Riptide.configuration.test_helper_path)
-      Dir.glob(File.join(@root, Riptide.configuration.test_glob)).sort.each { |f| require f }
+
+      exclude = Riptide.configuration.test_exclude_patterns
+      files = Dir.glob(File.join(@root, Riptide.configuration.test_glob)).sort
+      files = files.reject { |f| exclude.any? { |pattern| f.match?(pattern) } } unless exclude.empty?
+      files.each { |f| require f }
     end
   end
 end

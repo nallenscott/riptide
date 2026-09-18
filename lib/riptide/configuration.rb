@@ -21,6 +21,12 @@ module Riptide
     # Glob, relative to the host app's root, of every test file to load.
     attr_accessor :test_glob
 
+    # Files matching test_glob are skipped if their path matches any of
+    # these regexes. Mirrors an app's own test-partitioning convention
+    # (e.g. a rake task excluding test/controllers for a "unit" run)
+    # rather than requiring riptide to know about it structurally.
+    attr_accessor :test_exclude_patterns
+
     def initialize
       @db_path = "tmp/riptide/riptide.db"
       @global_fallback_patterns = %w[
@@ -34,6 +40,7 @@ module Riptide
       @main_branch = "main"
       @test_helper_path = "test/test_helper.rb"
       @test_glob = "test/**/*_test.rb"
+      @test_exclude_patterns = []
     end
   end
 end

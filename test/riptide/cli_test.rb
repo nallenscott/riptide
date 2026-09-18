@@ -37,5 +37,50 @@ module Riptide
         assert_equal "main", CLI.new([], root: root).send(:default_base)
       end
     end
+
+    def test_store_path_joins_a_relative_db_path_to_root
+      Riptide.configuration.db_path = "tmp/riptide/riptide.db"
+
+      assert_equal "/app/tmp/riptide/riptide.db", CLI.new([], root: "/app").send(:store_path)
+    ensure
+      Riptide.configuration.db_path = "tmp/riptide/riptide.db"
+    end
+
+    def test_store_path_leaves_an_absolute_db_path_untouched
+      Riptide.configuration.db_path = "/workspace/riptide.db"
+
+      assert_equal "/workspace/riptide.db", CLI.new([], root: "/app").send(:store_path)
+    ensure
+      Riptide.configuration.db_path = "tmp/riptide/riptide.db"
+    end
+
+    def test_load_test_files_skips_files_matching_test_exclude_patterns
+      Dir.mktmpdir do |root|
+        FileUtils.mkdir_p(File.join(root, "test/controllers"))
+        FileUtils.mkdir_p(File.join(root, "test/models"))
+        File.write(File.join(root, "test/test_helper.rb"), "require 'minitest/autorun'\n")
+        File.write(File.join(root, "test/controllers/widget_controller_test.rb"), <<~RUBY)
+          Object.const_set(:CLIFixtureControllerTest, Class.new(Minitest::Test) { def test_a; end })
+        RUBY
+        File.write(File.join(root, "test/models/widget_test.rb"), <<~RUBY)
+          Object.const_set(:CLIFixtureModelTest, Class.new(Minitest::Test) { def test_a; end })
+        RUBY
+
+        Riptide.configuration.test_exclude_patterns = [%r{test/controllers}]
+
+        CLI.new([], root: root).send(:load_test_files)
+
+        assert defined?(CLIFixtureModelTest)
+        refute defined?(CLIFixtureControllerTest)
+      ensure
+        Riptide.configuration.test_exclude_patterns = []
+        [:CLIFixtureModelTest, :CLIFixtureControllerTest].each do |const|
+          next unless Object.const_defined?(const)
+
+          Minitest::Runnable.runnables.delete(Object.const_get(const))
+          Object.send(:remove_const, const)
+        end
+      end
+    end
   end
 end
