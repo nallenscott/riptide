@@ -62,14 +62,9 @@ module Minitest
     end
 
     decision = Riptide::Selector.new(store: store, root: root, discovered_tests_by_file: discovered).select(base: base)
+    total = discovered.values.flatten(1).size
 
-    case decision.mode
-    when :full
-      puts "[riptide] plan vs #{base}: full suite (#{decision.reason})"
-    when :selected
-      total = discovered.values.flatten(1).size
-      puts "[riptide] plan vs #{base}: #{decision.selected.size}/#{total} tests"
-    end
+    puts "[riptide] plan vs #{base}: #{decision.summary(total: total)}"
   end
 
   register_plugin(:riptide)

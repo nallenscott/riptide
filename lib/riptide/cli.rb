@@ -52,7 +52,7 @@ module Riptide
       load_test_files
       discovered = discovered_tests_by_file
       decision = store.empty? ? bootstrap_decision : compute_decision(store, discovered)
-      report(decision)
+      report(decision, discovered.values.flatten(1).size)
     end
 
     # Loading test files first, before deciding anything, is what gives
@@ -66,7 +66,7 @@ module Riptide
       store.prune_except(discovered.values.flatten(1))
 
       decision = store.empty? ? bootstrap_decision : compute_decision(store, discovered)
-      report(decision)
+      report(decision, discovered.values.flatten(1).size)
 
       Runner.new(decision: decision).apply
     end
@@ -111,13 +111,8 @@ module Riptide
       Riptide.configuration.main_branch
     end
 
-    def report(decision)
-      case decision.mode
-      when :full
-        puts "Selected: full suite (#{decision.reason})"
-      when :selected
-        puts "Selected: #{decision.selected.size} tests"
-      end
+    def report(decision, total)
+      puts "Selected: #{decision.summary(total: total)}"
     end
 
     # Test files, and test_helper itself, commonly require each other with a

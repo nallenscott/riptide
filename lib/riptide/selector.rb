@@ -4,7 +4,24 @@ require "set"
 
 module Riptide
   class Selector
-    Decision = Struct.new(:mode, :reason, :selected, keyword_init: true)
+    Decision = Struct.new(:mode, :reason, :selected, keyword_init: true) do
+      # A human-readable description of this decision, shared by the CLI's
+      # own commands and the Minitest plugin's dry_run logging, the two
+      # places that report what got decided. Includes every selected
+      # test and why, not just a count: a count alone can't be checked
+      # against anything, the whole point of dry_run is to be able to
+      # compare a decision against what actually happened later.
+      # +total+, when given, adds "N/total" instead of a bare count.
+      def summary(total: nil)
+        return "full suite (#{reason})" if mode == :full
+
+        header = total ? "#{selected.size}/#{total} tests" : "#{selected.size} tests"
+        return header if selected.empty?
+
+        lines = selected.map { |test| "  #{test[:class_name]}##{test[:method_name]}: #{test[:reasons].join(", ")}" }
+        ([header] + lines).join("\n")
+      end
+    end
 
     # +discovered_tests_by_file+ is { relative_path => [[class_name, method_name], ...] },
     # every test method Minitest currently knows about, grouped by the file
