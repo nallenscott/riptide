@@ -14,9 +14,14 @@ module Riptide
     # line-level coverage can't be trusted to capture.
     attr_accessor :global_fallback_patterns
 
-    # Branch a default diff base is computed against, as origin/<main_branch>.
-    # Not every app calls it "main".
-    attr_accessor :main_branch
+    # Branch a default diff base is computed against, as
+    # <default_remote>/<default_branch>. Not every app calls it "main".
+    attr_accessor :default_branch
+
+    # Remote a default diff base is fetched from, as
+    # <default_remote>/<default_branch>. Not every remote is named
+    # "origin", though nearly every one is.
+    attr_accessor :default_remote
 
     # Required before any test file, boots whatever the host app's test
     # environment needs (Rails, fixtures, etc.).
@@ -48,7 +53,8 @@ module Riptide
         config/environment.rb
         config/initializers/**/*
       ]
-      @main_branch = "main"
+      @default_branch = "main"
+      @default_remote = "origin"
       @test_helper_path = "test/test_helper.rb"
       @test_glob = "test/**/*_test.rb"
       @test_exclude_patterns = []

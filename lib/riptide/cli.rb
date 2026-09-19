@@ -96,19 +96,9 @@ module Riptide
     end
 
     def compute_decision(store, discovered)
-      base = default_base
+      base = Riptide.default_base
       puts "Comparing HEAD against #{base}"
       Selector.new(store: store, root: @root, discovered_tests_by_file: discovered).select(base: base)
-    end
-
-    # Merge-base against origin/<main_branch> when that ref exists, the
-    # common ancestor a normal feature branch diverged from. Falls back to
-    # main_branch itself when there's no such remote ref, e.g. no "origin"
-    # configured at all.
-    def default_base
-      Diff.merge_base("origin/#{Riptide.configuration.main_branch}")
-    rescue Error
-      Riptide.configuration.main_branch
     end
 
     def report(decision, total)

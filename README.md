@@ -51,7 +51,7 @@ That's the entire setup. It's a real Minitest plugin (`Minitest.register_plugin`
 bundle exec riptide run
 ```
 
-First run bootstraps automatically: no map exists yet, so it runs the full suite and builds one. Every run after that computes a diff against `origin/<main branch>` (configurable) and runs only what that diff could affect.
+First run bootstraps automatically: no map exists yet, so it runs the full suite and builds one. Every run after that computes a diff against `<default_remote>/<default_branch>` (both configurable, defaulting to `origin`/`main`) and runs only what that diff could affect.
 
 ```bash
 bundle exec riptide rebuild

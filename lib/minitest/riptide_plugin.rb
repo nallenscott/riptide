@@ -55,12 +55,7 @@ module Minitest
       end
     end
 
-    base = begin
-      Riptide::Diff.merge_base("origin/#{Riptide.configuration.main_branch}")
-    rescue Riptide::Error
-      Riptide.configuration.main_branch
-    end
-
+    base = Riptide.default_base
     decision = Riptide::Selector.new(store: store, root: root, discovered_tests_by_file: discovered).select(base: base)
     total = discovered.values.flatten(1).size
 
