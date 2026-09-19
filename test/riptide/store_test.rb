@@ -175,6 +175,34 @@ module Riptide
       end
     end
 
+    def test_many_concurrent_workers_all_merge_without_contention_errors
+      skip "fork not supported on this platform" unless Process.respond_to?(:fork)
+
+      Dir.mktmpdir do |dir|
+        store = Store.new(path: File.join(dir, "riptide.db"))
+        worker_count = 8
+
+        pids = worker_count.times.map do |i|
+          fork do
+            store.record(
+              class_name: "ProviderTest",
+              method_name: "test_from_worker_#{i}",
+              coverage: { "app/models/provider.rb" => Set[i] },
+              blob_shas: { "app/models/provider.rb" => "sha-a" }
+            )
+          end
+        end
+        statuses = pids.map { |pid| Process.wait2(pid).last }
+
+        assert(statuses.all?(&:success?), "a worker failed: #{statuses.map(&:to_s)}")
+
+        deps = store.dependencies_for_file("app/models/provider.rb")
+        assert_equal worker_count, deps.size
+        assert_equal (0...worker_count).map { |i| "test_from_worker_#{i}" }.sort, deps.map { |d| d[:method_name] }.sort
+        assert_empty Dir.glob(File.join(dir, "*.worker-*"))
+      end
+    end
+
     def test_reset_wipes_every_test_and_dependency_row
       @store.record(
         class_name: "ProviderTest", method_name: "test_a",

@@ -131,18 +131,87 @@ module Riptide
     # Rails' test parallelization forks real OS child processes after this
     # Store already exists (built once at Minitest plugin init, before any
     # forking happens). A SQLite connection isn't safe to keep using across
-    # a fork, so each access checks whether the pid has changed and opens a
-    # fresh connection for the current process when it has, the same
-    # fork-safety check ActiveRecord's own connection pool does.
+    # a fork, so each access checks whether the pid has changed. The first
+    # access after a fork goes to #connect_worker! instead of just reopening
+    # the shared file: every sibling worker hits that same reconnect at
+    # roughly the same moment, and reopening one shared file from all of
+    # them at once, then hammering it with every test's #record for the
+    # rest of the run, is worse contention than necessary.
     def db
-      connect! if @pid != Process.pid
+      connect_worker! if @pid != Process.pid
       @db
     end
 
+    # Opens the canonical file directly. Only ever called from #initialize,
+    # before any forking has happened, so there's no contention to avoid
+    # yet, this is the only Store in the process at this point.
     def connect!
-      @db = SQLite3::Database.new(@path)
-      @db.execute_batch(SCHEMA)
+      @db = open(@path)
       @pid = Process.pid
+    end
+
+    # Gives this worker its own private file instead of the shared one, so
+    # every #record for the rest of this process's tests only ever
+    # contends with itself. Merges back into the canonical file, and
+    # cleans up the worker file, exactly once, when this process exits,
+    # registered fresh from inside the fork so it's tied to this process
+    # specifically rather than relying on whatever hook the host app's
+    # parallelization mechanism happens to offer.
+    def connect_worker!
+      worker_path = "#{@path}.worker-#{Process.pid}"
+      @db = open(worker_path)
+      @pid = Process.pid
+      at_exit { merge_worker_into_canonical!(worker_path) }
+    end
+
+    def open(path)
+      db = SQLite3::Database.new(path)
+      db.busy_timeout = 5000
+      db.execute_batch(SCHEMA)
+      db
+    end
+
+    # Copies a worker's rows into the canonical file, remapping each row's
+    # test_id along the way: the worker's autoincrement ids and the
+    # canonical file's are independent sequences, only (class_name,
+    # method_name) identifies the same test across both. Runs against
+    # whatever's actually in the worker file at exit, a test's coverage of
+    # a file is only ever recorded after that test finishes, so a run that
+    # gets killed mid-test just leaves that one test's dependencies stale
+    # rather than merging anything read mid-write.
+    def merge_worker_into_canonical!(worker_path)
+      return unless File.exist?(worker_path)
+
+      worker_db = SQLite3::Database.new(worker_path)
+      tests = worker_db.execute("SELECT id, class_name, method_name FROM tests").to_h { |id, cn, mn| [id, [cn, mn]] }
+      dependencies = worker_db.execute("SELECT test_id, source_file, source_blob_sha, covered_lines FROM test_dependencies")
+      worker_db.close
+
+      canonical = open(@path)
+      canonical.transaction do
+        dependencies.each do |worker_test_id, source_file, source_blob_sha, covered_lines|
+          class_name, method_name = tests.fetch(worker_test_id)
+
+          canonical.execute(<<~SQL, [class_name, method_name])
+            INSERT INTO tests (class_name, method_name) VALUES (?, ?)
+            ON CONFLICT(class_name, method_name) DO NOTHING
+          SQL
+          test_id = canonical.execute(
+            "SELECT id FROM tests WHERE class_name = ? AND method_name = ?", [class_name, method_name]
+          ).first.first
+
+          canonical.execute(<<~SQL, [test_id, source_file, source_blob_sha, covered_lines])
+            INSERT INTO test_dependencies (test_id, source_file, source_blob_sha, covered_lines)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(test_id, source_file) DO UPDATE SET
+              source_blob_sha = excluded.source_blob_sha,
+              covered_lines = excluded.covered_lines
+          SQL
+        end
+      end
+      canonical.close
+    ensure
+      File.delete(worker_path) if File.exist?(worker_path)
     end
 
     def upsert_test(class_name, method_name)
