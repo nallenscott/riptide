@@ -154,6 +154,27 @@ module Riptide
       assert_equal 1, @store.dependencies_for_file("app/models/provider.rb").size
     end
 
+    def test_survives_a_fork_started_after_the_connection_was_opened
+      skip "fork not supported on this platform" unless Process.respond_to?(:fork)
+
+      Dir.mktmpdir do |dir|
+        store = Store.new(path: File.join(dir, "riptide.db"))
+
+        pid = fork do
+          store.record(
+            class_name: "ProviderTest",
+            method_name: "test_from_child",
+            coverage: { "app/models/provider.rb" => Set[1] },
+            blob_shas: { "app/models/provider.rb" => "sha-a" }
+          )
+        end
+        _, status = Process.wait2(pid)
+
+        assert_predicate status, :success?
+        assert_equal 1, store.dependencies_for_file("app/models/provider.rb").size
+      end
+    end
+
     def test_reset_wipes_every_test_and_dependency_row
       @store.record(
         class_name: "ProviderTest", method_name: "test_a",

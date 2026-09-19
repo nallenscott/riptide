@@ -5,6 +5,13 @@ require "json"
 require "fileutils"
 require "set"
 
+# The gem's own fork-safety guard (SQLite3::ForkSafety) closes an inherited
+# writable connection after a fork and warns about it, aimed at code that
+# doesn't know to reconnect. Store's #db accessor already detects the pid
+# change and reconnects on every access, so the warning is just noise here,
+# and one that reprints per parallel test worker.
+SQLite3::ForkSafety.suppress_warnings!
+
 module Riptide
   class Store
     SCHEMA = <<~SQL
@@ -31,9 +38,9 @@ module Riptide
     SQL
 
     def initialize(path:)
+      @path = path
       FileUtils.mkdir_p(File.dirname(path)) unless path == ":memory:"
-      @db = SQLite3::Database.new(path)
-      @db.execute_batch(SCHEMA)
+      connect!
     end
 
     # Persists one test's coverage. +coverage+ is { relative_path =>
@@ -43,14 +50,14 @@ module Riptide
     # (test, file) pair, a test's coverage of a file is a fresh snapshot
     # each time it runs, not something to merge with the last one.
     def record(class_name:, method_name:, coverage:, blob_shas:)
-      @db.transaction do
+      db.transaction do
         test_id = upsert_test(class_name, method_name)
 
         coverage.each do |source_file, lines|
           next if lines.empty?
 
           ranges = Ranges.compress(lines)
-          @db.execute(<<~SQL, [test_id, source_file, blob_shas.fetch(source_file), ranges.to_json])
+          db.execute(<<~SQL, [test_id, source_file, blob_shas.fetch(source_file), ranges.to_json])
             INSERT INTO test_dependencies (test_id, source_file, source_blob_sha, covered_lines)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(test_id, source_file) DO UPDATE SET
@@ -65,7 +72,7 @@ module Riptide
     # was last recorded:
     #   [{ class_name:, method_name:, source_blob_sha:, ranges: [[start, finish], ...] }, ...]
     def dependencies_for_file(source_file)
-      rows = @db.execute(<<~SQL, [source_file])
+      rows = db.execute(<<~SQL, [source_file])
         SELECT tests.class_name, tests.method_name, test_dependencies.source_blob_sha, test_dependencies.covered_lines
         FROM test_dependencies
         JOIN tests ON tests.id = test_dependencies.test_id
@@ -85,16 +92,16 @@ module Riptide
     # True until the first test has ever been recorded, the signal a fresh
     # database is a bootstrap case rather than an empty-but-known map.
     def empty?
-      @db.execute("SELECT COUNT(*) FROM tests").first.first.zero?
+      db.execute("SELECT COUNT(*) FROM tests").first.first.zero?
     end
 
     # Wipes every recorded test and its dependency rows, forcing the next
     # run back into the bootstrap path. Schema stays intact, nothing needs
     # recreating.
     def reset!
-      @db.transaction do
-        @db.execute("DELETE FROM test_dependencies")
-        @db.execute("DELETE FROM tests")
+      db.transaction do
+        db.execute("DELETE FROM test_dependencies")
+        db.execute("DELETE FROM tests")
       end
     end
 
@@ -106,28 +113,45 @@ module Riptide
     def prune_except(known_tests)
       known = known_tests.to_set
 
-      stale_ids = @db.execute("SELECT id, class_name, method_name FROM tests").filter_map do |id, class_name, method_name|
+      stale_ids = db.execute("SELECT id, class_name, method_name FROM tests").filter_map do |id, class_name, method_name|
         id unless known.include?([class_name, method_name])
       end
       return if stale_ids.empty?
 
-      @db.transaction do
+      db.transaction do
         stale_ids.each do |id|
-          @db.execute("DELETE FROM test_dependencies WHERE test_id = ?", [id])
-          @db.execute("DELETE FROM tests WHERE id = ?", [id])
+          db.execute("DELETE FROM test_dependencies WHERE test_id = ?", [id])
+          db.execute("DELETE FROM tests WHERE id = ?", [id])
         end
       end
     end
 
     private
 
+    # Rails' test parallelization forks real OS child processes after this
+    # Store already exists (built once at Minitest plugin init, before any
+    # forking happens). A SQLite connection isn't safe to keep using across
+    # a fork, so each access checks whether the pid has changed and opens a
+    # fresh connection for the current process when it has, the same
+    # fork-safety check ActiveRecord's own connection pool does.
+    def db
+      connect! if @pid != Process.pid
+      @db
+    end
+
+    def connect!
+      @db = SQLite3::Database.new(@path)
+      @db.execute_batch(SCHEMA)
+      @pid = Process.pid
+    end
+
     def upsert_test(class_name, method_name)
-      @db.execute(<<~SQL, [class_name, method_name])
+      db.execute(<<~SQL, [class_name, method_name])
         INSERT INTO tests (class_name, method_name) VALUES (?, ?)
         ON CONFLICT(class_name, method_name) DO NOTHING
       SQL
 
-      @db.execute(
+      db.execute(
         "SELECT id FROM tests WHERE class_name = ? AND method_name = ?", [class_name, method_name]
       ).first.first
     end
