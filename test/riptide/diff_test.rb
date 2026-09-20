@@ -123,5 +123,29 @@ module Riptide
         end
       end
     end
+
+    def test_blob_sha_matches_git_hash_object
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "widget.rb")
+        File.write(path, "class Widget\nend\n")
+
+        assert_equal `git hash-object #{path}`.strip, Diff.blob_sha(path)
+      end
+    end
+
+    def test_blob_sha_matches_git_hash_object_for_binary_content
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "widget.rb")
+        File.binwrite(path, "no trailing newline, and a null byte: \x00 in the middle")
+
+        assert_equal `git hash-object #{path}`.strip, Diff.blob_sha(path)
+      end
+    end
+
+    def test_blob_sha_raises_for_a_missing_file
+      Dir.mktmpdir do |dir|
+        assert_raises(Riptide::Error) { Diff.blob_sha(File.join(dir, "nonexistent.rb")) }
+      end
+    end
   end
 end

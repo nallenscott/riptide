@@ -27,10 +27,17 @@ module Riptide
       # ran afterward. The plugin is the only place that calls include.
       def self.wire(store:, root:)
         self.root = root
+        # A file's blob sha can't change mid-run, the working tree is fixed
+        # for the whole build, so a file every test in this process touches
+        # (test_helper.rb, a shared concern) only needs hashing once here,
+        # not once per test that happens to cover it.
+        blob_sha_cache = {}
         self.on_capture = lambda do |class_name, method_name, coverage|
           next if coverage.empty?
 
-          blob_shas = coverage.keys.to_h { |file| [file, Diff.blob_sha(File.join(root, file))] }
+          blob_shas = coverage.keys.to_h do |file|
+            [file, blob_sha_cache[file] ||= Diff.blob_sha(File.join(root, file))]
+          end
           store.record(class_name: class_name, method_name: method_name, coverage: coverage, blob_shas: blob_shas)
         end
       end

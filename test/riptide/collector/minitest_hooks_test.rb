@@ -28,6 +28,22 @@ module Riptide
         end
       end
 
+      def test_wire_hashes_a_shared_file_only_once_across_multiple_tests
+        in_repo do |root|
+          write_and_commit(root, "test/test_helper.rb", "require 'minitest/autorun'\n", message: "base")
+          store = Store.new(path: ":memory:")
+
+          call_count = 0
+          Diff.stub(:blob_sha, ->(_path) { call_count += 1; "stub-sha" }) do
+            MinitestHooks.wire(store: store, root: root)
+            MinitestHooks.on_capture.call("ATest", "test_a", { "test/test_helper.rb" => Set[1] })
+            MinitestHooks.on_capture.call("BTest", "test_b", { "test/test_helper.rb" => Set[2] })
+          end
+
+          assert_equal 1, call_count
+        end
+      end
+
       def test_wire_skips_tests_with_empty_coverage
         store = Store.new(path: ":memory:")
         MinitestHooks.wire(store: store, root: Dir.pwd)

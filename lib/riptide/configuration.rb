@@ -75,10 +75,10 @@ module Riptide
       @fallback_patterns = [
         "Gemfile",
         "Gemfile.lock",
-        @test_helper_path,
         "config/application.rb",
         "config/environment.rb",
-        "config/initializers/**/*"
+        "config/initializers/**/*",
+        @test_helper_path
       ]
       @source_patterns = []
       @test_glob = "test/**/*_test.rb"
