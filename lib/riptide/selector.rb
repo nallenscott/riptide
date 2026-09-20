@@ -5,12 +5,12 @@ require "set"
 module Riptide
   class Selector
     Decision = Struct.new(:mode, :reason, :selected, keyword_init: true) do
-      # A human-readable description of this decision, shared by the CLI's
-      # own commands and the Minitest plugin's dry_run logging, the two
+      # A human-readable description of this decision, shared by the CLI
+      # commands and the Minitest plugin's dry_run logging, the two
       # places that report what got decided. Includes every selected
       # test and why, not just a count: a count alone can't be checked
       # against anything, the whole point of dry_run is to be able to
-      # compare a decision against what actually happened later.
+      # compare a decision against what happened later.
       # +total+, when given, adds "N/total" instead of a bare count.
       def summary(total: nil)
         return "full suite (#{reason})" if mode == :full
@@ -25,12 +25,12 @@ module Riptide
 
     # +discovered_tests_by_file+ is { relative_path => [[class_name, method_name], ...] },
     # every test method Minitest currently knows about, grouped by the file
-    # it's actually defined in (via Method#source_location, not a naming
-    # convention). Without it, a test method Store has never recorded
+    # it's defined in (via Method#source_location, not a naming
+    # convention). Without it, a test method Store hasn't recorded
     # (a brand new test file, or a new method added to an existing one)
-    # never gets selected at all: it has no dependency rows to diff
-    # against, and isn't "modified" content Store already tracks, so it
-    # silently never runs.
+    # doesn't get selected at all: it has no dependency rows to diff
+    # against, and isn't "modified" content Store tracks, so it silently
+    # doesn't run.
     def initialize(store:, root: Dir.pwd, discovered_tests_by_file: {})
       @store = store
       @root = root
@@ -44,8 +44,8 @@ module Riptide
     def select(base:, head: "HEAD")
       changed = Diff.changed_files(base, head)
 
-      full_suite_reason = find_full_suite_trigger(changed)
-      return Decision.new(mode: :full, reason: full_suite_reason, selected: []) if full_suite_reason
+      fallback_reason = find_fallback_reason(changed)
+      return Decision.new(mode: :full, reason: fallback_reason, selected: []) if fallback_reason
 
       selected = {}
       changed.each do |file|
@@ -58,15 +58,19 @@ module Riptide
 
     private
 
-    # Any test currently defined in +file+ that Store has never recorded
+    # Any test currently defined in +file+ that Store hasn't recorded
     # coverage for gets selected outright, regardless of the file's diff
-    # status. A test already known to Store is left to accumulate_selection's
+    # status. A test known to Store is left to accumulate_selection's
     # precise line-diffing instead of being re-selected unconditionally here.
+    # Looks Store up by lookup_path_for, not file[:path]: for a renamed
+    # file, Store's rows are still keyed by the old path, checking the new
+    # one would always come back empty and treat every test in the file as
+    # newly discovered.
     def add_undiscovered_tests(file, selected)
       tests_in_file = @discovered_tests_by_file[file[:path]] || []
       return if tests_in_file.empty?
 
-      known = @store.dependencies_for_file(file[:path]).map { |d| [d[:class_name], d[:method_name]] }.to_set
+      known = @store.dependencies_for_file(lookup_path_for(file)).map { |d| [d[:class_name], d[:method_name]] }.to_set
 
       tests_in_file.each do |class_name, method_name|
         next if known.include?([class_name, method_name])
@@ -76,17 +80,20 @@ module Riptide
       end
     end
 
-    # A file that matches a global fallback pattern always forces a full
-    # run. A file that already existed and was touched, modified, deleted,
-    # or renamed, but that Store has zero historical coverage for, also
-    # forces a full run: we can't tell whether that's genuinely untested
-    # code or an incomplete map, and the safe assumption is the latter. A
-    # brand-new file is exempt from that second check, having no history
-    # yet is expected, not suspicious.
-    def find_full_suite_trigger(changed)
+    # A file that matches a fallback pattern always forces a full run. An
+    # existing file that was touched, modified, deleted, or renamed, but
+    # that Store has zero historical coverage for, also forces a full
+    # run: we can't tell whether that's untested code or an incomplete
+    # map, and the safe assumption is the latter. A brand-new file is
+    # exempt from that second check, having no history yet is expected,
+    # not suspicious. So is a file outside source_patterns (when the app
+    # has set it): no test execution could produce history for it, so an
+    # empty history there isn't a signal of anything.
+    def find_fallback_reason(changed)
       changed.each do |file|
-        return "#{file[:path]} matches a global fallback pattern" if global_fallback?(file[:path])
+        return "#{file[:path]} matches a fallback pattern" if fallback_pattern?(file[:path])
         next if file[:status] == :added
+        next unless in_source_scope?(file[:path])
 
         lookup_path = lookup_path_for(file)
         return "#{file[:path]} has no historical coverage" if @store.dependencies_for_file(lookup_path).empty?
@@ -135,10 +142,19 @@ module Riptide
       file[:status] == :renamed ? file[:old_path] : file[:path]
     end
 
-    def global_fallback?(path)
-      Riptide.configuration.global_fallback_patterns.any? do |pattern|
-        File.fnmatch?(pattern, path, File::FNM_PATHNAME | File::FNM_EXTGLOB)
-      end
+    def fallback_pattern?(path)
+      matches_any?(Riptide.configuration.fallback_patterns, path)
+    end
+
+    # True when source_patterns is unset (the original, unscoped behavior)
+    # or path matches one of the app's declared patterns.
+    def in_source_scope?(path)
+      patterns = Riptide.configuration.source_patterns
+      patterns.empty? || matches_any?(patterns, path)
+    end
+
+    def matches_any?(patterns, path)
+      patterns.any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME | File::FNM_EXTGLOB) }
     end
   end
 end

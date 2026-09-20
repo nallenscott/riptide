@@ -5,11 +5,11 @@ require "json"
 require "fileutils"
 require "set"
 
-# The gem's own fork-safety guard (SQLite3::ForkSafety) closes an inherited
+# The gem's fork-safety guard (SQLite3::ForkSafety) closes an inherited
 # writable connection after a fork and warns about it, aimed at code that
-# doesn't know to reconnect. Store's #db accessor already detects the pid
-# change and reconnects on every access, so the warning is just noise here,
-# and one that reprints per parallel test worker.
+# doesn't know to reconnect. Store's #db accessor detects the pid change
+# and reconnects on every access, so the warning is just noise here, and
+# one that reprints per parallel test worker.
 SQLite3::ForkSafety.suppress_warnings!
 
 module Riptide
@@ -128,8 +128,8 @@ module Riptide
 
     private
 
-    # Rails' test parallelization forks real OS child processes after this
-    # Store already exists (built once at Minitest plugin init, before any
+    # Rails' test parallelization forks OS child processes after this
+    # Store exists (built once at Minitest plugin init, before any
     # forking happens). A SQLite connection isn't safe to keep using across
     # a fork, so each access checks whether the pid has changed. The first
     # access after a fork goes to #connect_worker! instead of just reopening
@@ -150,7 +150,7 @@ module Riptide
       @pid = Process.pid
     end
 
-    # Gives this worker its own private file instead of the shared one, so
+    # Gives this worker a private file instead of the shared one, so
     # every #record for the rest of this process's tests only ever
     # contends with itself. Merges back into the canonical file, and
     # cleans up the worker file, exactly once, when this process exits,
@@ -175,7 +175,7 @@ module Riptide
     # test_id along the way: the worker's autoincrement ids and the
     # canonical file's are independent sequences, only (class_name,
     # method_name) identifies the same test across both. Runs against
-    # whatever's actually in the worker file at exit, a test's coverage of
+    # whatever's in the worker file at exit, a test's coverage of
     # a file is only ever recorded after that test finishes, so a run that
     # gets killed mid-test just leaves that one test's dependencies stale
     # rather than merging anything read mid-write.

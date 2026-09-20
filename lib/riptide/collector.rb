@@ -8,7 +8,7 @@ module Riptide
   # module. Coverage's result/peek_result cost scales with every file ever
   # loaded into the process, not just the ones touched, which makes it
   # unusable for a per-test checkpoint in a large app. A plain TracePoint
-  # accumulator only pays for lines that actually execute.
+  # accumulator only pays for lines that execute.
   #
   # This does not see "code-less" classes, plain data objects whose only
   # footprint is allocation, with no method body a line event would ever

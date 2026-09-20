@@ -45,7 +45,7 @@ module Riptide
       end
     end
 
-    # The commit where +ref+ and HEAD diverged, git's own definition of a
+    # The commit where +ref+ and HEAD diverged, git's definition of a
     # sensible diff base for a feature branch.
     def merge_base(ref)
       out, err, status = Open3.capture3("git", "merge-base", "HEAD", ref)
@@ -78,8 +78,8 @@ module Riptide
     # [start, finish] if every hunk fell entirely outside the range, a pure
     # shift caused by unrelated edits elsewhere in the file. Returns nil if
     # any hunk overlaps the range, meaning the covered code itself may have
-    # changed and the caller should treat this as a real hit rather than
-    # trust a remapped range.
+    # changed and the caller should treat this as a hit rather than trust
+    # a remapped range.
     #
     # A pure insertion (old_count 0) counts as overlapping when it lands
     # inside or right at the edge of the range: new code inserted inside a

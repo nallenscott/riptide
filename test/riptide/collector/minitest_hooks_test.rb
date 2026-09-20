@@ -59,7 +59,7 @@ module Riptide
 
           fixture_class = build_fixture_test_class
 
-          # Real Minitest invocation always passes string method names (see
+          # Minitest invocation always passes string method names (see
           # Runnable.run in the minitest source); using a string here too,
           # rather than a symbol, is what caught this the first time around.
           fixture_class.new("test_touches_a").run
@@ -79,12 +79,12 @@ module Riptide
       private
 
       # Subclassing Minitest::Test registers the class in
-      # Minitest::Runnable.runnables, the global list rake test's own runner
+      # Minitest::Runnable.runnables, the global list rake test's runner
       # discovers and runs. We remove it again in the caller's ensure block
-      # so this fixture never gets picked up as a real test. It's also
-      # assigned to a real constant, not left anonymous, so self.class.name
-      # in before_teardown resolves to something real, matching what a
-      # genuine test class would report.
+      # so the rest of the suite doesn't pick this fixture up as a test.
+      # It's also assigned to a named constant, not left anonymous, so
+      # self.class.name in before_teardown resolves the same way it would
+      # for an ordinary test class.
       def build_fixture_test_class
         klass = Class.new(Minitest::Test) do
           include Riptide::Collector::MinitestHooks

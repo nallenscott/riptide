@@ -63,7 +63,7 @@ module Riptide
     def test_translate_range_returns_nil_when_a_modification_overlaps_the_range
       hunks = [
         Diff::Hunk.new(0, 0, 1, 3),  # unrelated insertion above, pure shift
-        Diff::Hunk.new(5, 1, 8, 1)   # real change at old line 5, inside [4,10]
+        Diff::Hunk.new(5, 1, 8, 1)   # change at old line 5, inside [4,10]
       ]
 
       assert_nil Diff.translate_range(hunks, 4, 10)

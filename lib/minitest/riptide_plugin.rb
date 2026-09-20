@@ -6,16 +6,15 @@ require "riptide"
 #
 #   require "minitest/riptide_plugin"
 #
-# That's the entire setup, for any test run, riptide's own CLI or a plain
+# That's the entire setup, for any test run, riptide's CLI or a plain
 # `bin/rails test`/`rake test`. Minitest's plugin loading has been opt-in
 # since it made auto-discovering and auto-loading any gem's plugin file
-# just for being installed a real problem ("bad actors installed
-# globally", per minitest's own History.rdoc), so this file registers
-# itself explicitly with Minitest.register_plugin rather than relying on
-# being found automatically. register_plugin, init_plugins, and the
-# plugin_<name>_init hook convention are the same API across minitest 5.x
-# and 6.x, confirmed directly against both, so this needs nothing
-# version-specific.
+# just for being installed a problem ("bad actors installed globally",
+# per minitest's History.rdoc), so this file registers itself explicitly
+# with Minitest.register_plugin rather than relying on being found
+# automatically. register_plugin, init_plugins, and the plugin_<name>_init
+# hook convention are the same API across minitest 5.x and 6.x, verified
+# directly against both, so this needs nothing version-specific.
 module Minitest
   # Some apps' own boot chains call Minitest.autorun more than once (Rails
   # itself does: rails/test_help requires active_support/testing/autorun,
@@ -38,22 +37,17 @@ module Minitest
   end
 
   # Same decision-making as Riptide::CLI's plan command, Selector is the
-  # shared piece, but gathers its own inputs instead of going through CLI:
-  # by the time this hook fires, Minitest has already discovered every
-  # test in this process, so there's nothing to boot or load a second
-  # time. Never filters or skips anything, only prints.
+  # shared piece, but gathers its inputs instead of going through CLI:
+  # by the time this hook fires, Minitest has discovered every test in
+  # this process, so there's nothing to boot or load a second time.
+  # Doesn't filter or skip anything, only prints.
   def self.riptide_dry_run(store, root)
     if store.empty?
       puts "[riptide] plan: no dependency map yet"
       return
     end
 
-    discovered = Minitest::Runnable.runnables.each_with_object(Hash.new { |h, k| h[k] = [] }) do |klass, mapping|
-      klass.methods_matching(/^test_/).each do |method|
-        file = klass.instance_method(method).source_location&.first
-        mapping[file.delete_prefix("#{root}/")] << [klass.name, method] if file
-      end
-    end
+    discovered = Riptide.discovered_tests_by_file(root: root)
 
     base = Riptide.default_base
     decision = Riptide::Selector.new(store: store, root: root, discovered_tests_by_file: discovered).select(base: base)

@@ -49,7 +49,7 @@ module Riptide
       end
     end
 
-    def test_a_global_fallback_file_forces_a_full_run_even_with_no_store_data
+    def test_a_fallback_pattern_file_forces_a_full_run_even_with_no_store_data
       in_repo do |root|
         write_and_commit(root, "Gemfile", "source 'https://rubygems.org'\n", message: "base")
         write_and_commit(root, "Gemfile", "source 'https://rubygems.org'\ngem 'rails'\n", message: "edit")
@@ -57,7 +57,61 @@ module Riptide
         decision = Selector.new(store: @store, root: root).select(base: "HEAD~1", head: "HEAD")
 
         assert_equal :full, decision.mode
-        assert_match(/global fallback pattern/, decision.reason)
+        assert_match(/fallback pattern/, decision.reason)
+      end
+    end
+
+    def test_a_file_outside_source_patterns_does_not_force_a_full_run_despite_no_history
+      Riptide.configuration.source_patterns = ["app/**/*.rb"]
+      in_repo do |root|
+        write_and_commit(root, "Rakefile", "task :default\n", message: "base")
+        write_and_commit(root, "Rakefile", "task :default do\nend\n", message: "edit")
+
+        decision = Selector.new(store: @store, root: root).select(base: "HEAD~1", head: "HEAD")
+
+        assert_equal :selected, decision.mode
+      end
+    ensure
+      Riptide.configuration.source_patterns = []
+    end
+
+    def test_a_file_inside_source_patterns_still_forces_a_full_run_with_no_history
+      Riptide.configuration.source_patterns = ["app/**/*.rb"]
+      in_repo do |root|
+        write_and_commit(root, "app/models/untracked.rb", "class Untracked\n  def a\n    1\n  end\nend\n", message: "base")
+        write_and_commit(root, "app/models/untracked.rb", "class Untracked\n  def a\n    2\n  end\nend\n", message: "edit")
+
+        decision = Selector.new(store: @store, root: root).select(base: "HEAD~1", head: "HEAD")
+
+        assert_equal :full, decision.mode
+        assert_match(/no historical coverage/, decision.reason)
+      end
+    ensure
+      Riptide.configuration.source_patterns = []
+    end
+
+    def test_a_pure_rename_with_prior_coverage_does_not_treat_the_test_as_newly_discovered
+      in_repo do |root|
+        write_and_commit(root, "test/models/provider_test.rb", provider_test_source, message: "base")
+        base_sha = Diff.blob_sha(File.join(root, "test/models/provider_test.rb"))
+        @store.record(
+          class_name: "ProviderTest", method_name: "test_a",
+          coverage: { "test/models/provider_test.rb" => Set[2, 3, 4] },
+          blob_shas: { "test/models/provider_test.rb" => base_sha }
+        )
+
+        FileUtils.mv(
+          File.join(root, "test/models/provider_test.rb"),
+          File.join(root, "test/models/renamed_provider_test.rb")
+        )
+        commit(root, "rename, no content change")
+
+        discovered = { "test/models/renamed_provider_test.rb" => [%w[ProviderTest test_a]] }
+        decision = Selector.new(store: @store, root: root, discovered_tests_by_file: discovered)
+                            .select(base: "HEAD~1", head: "HEAD")
+
+        assert_equal :selected, decision.mode
+        assert_empty decision.selected
       end
     end
 
@@ -89,7 +143,7 @@ module Riptide
           coverage: { "app/models/provider.rb" => Set[2, 3, 4] },
           blob_shas: { "app/models/provider.rb" => base_sha }
         )
-        # An unrelated already-tracked file, so this diff has something else
+        # An unrelated, previously-tracked file, so this diff has something else
         # to anchor "base" against besides the file being deleted.
         write_and_commit(root, "app/models/other.rb", "class Other\nend\n", message: "base 2")
 

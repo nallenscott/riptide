@@ -24,6 +24,12 @@ Gem::Specification.new do |spec|
   spec.executables = ["riptide"]
   spec.require_paths = ["lib"]
 
-  spec.add_dependency "minitest", ">= 5.0"
+  # 5.1 to match Rails' declared minitest floor (activesupport 7.0 and
+  # 8.1 both require >= 5.1). The plugin API this gem relies on
+  # (register_plugin, init_plugins) is verified identical on 5.27, 6.0.0,
+  # and 6.0.6, the versions checked; 7 doesn't exist yet, capping there
+  # means an incompatible future major fails loudly at bundle install
+  # instead of quietly at runtime.
+  spec.add_dependency "minitest", ">= 5.1", "< 7"
   spec.add_dependency "sqlite3", "~> 2.0"
 end

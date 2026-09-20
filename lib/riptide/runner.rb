@@ -11,12 +11,12 @@ module Riptide
     # filtered. Does not call Minitest.run itself, that's the caller's
     # job, and doesn't wire coverage collection either, that's the
     # Minitest plugin's job (lib/minitest/riptide_plugin.rb), triggered by
-    # the host app's own test_helper.rb, the same way for any test run.
+    # the host app's test_helper.rb, the same way for any test run.
     #
-    # +runnables+ defaults to Minitest's real global list, but can be
+    # +runnables+ defaults to Minitest's global list, but can be
     # overridden, filtering mutates each class's singleton runnable_methods
     # directly, and that has to be a caller-supplied list in tests, or it'd
-    # mutate every already-loaded test class for the rest of the process.
+    # mutate every loaded test class for the rest of the process.
     def apply(runnables: Minitest::Runnable.runnables)
       return if @decision.mode == :full
 
