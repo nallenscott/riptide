@@ -19,10 +19,11 @@ Gem::Specification.new do |spec|
 
   spec.required_ruby_version = ">= 3.0"
 
-  spec.files = Dir["lib/**/*.rb", "exe/*"] + ["riptide.gemspec"]
+  spec.files = Dir["lib/**/*.rb", "ext/**/*.{rb,c,h}", "exe/*"] + ["riptide.gemspec"]
   spec.bindir = "exe"
   spec.executables = ["riptide"]
   spec.require_paths = ["lib"]
+  spec.extensions = ["ext/riptide/extconf.rb"]
 
   # 5.1 to match Rails' declared minitest floor (activesupport 7.0 and
   # 8.1 both require >= 5.1). The plugin API this gem relies on

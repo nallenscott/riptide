@@ -2,6 +2,12 @@
 
 require "bundler/gem_tasks"
 require "minitest/test_task"
+require "rake/extensiontask"
+
+Rake::ExtensionTask.new("riptide_native") do |ext|
+  ext.ext_dir = "ext/riptide"
+  ext.lib_dir = "lib/riptide"
+end
 
 # riptide ships its own Minitest plugin (lib/minitest/riptide_plugin.rb),
 # which auto-activates for any Minitest run once the gem's on the load
@@ -13,4 +19,5 @@ Minitest::TestTask.create do |t|
   t.extra_args = ["--no-plugins"]
 end
 
+task test: :compile
 task default: :test
