@@ -41,6 +41,7 @@ module Riptide
       @path = path
       FileUtils.mkdir_p(File.dirname(path)) unless path == ":memory:"
       connect!
+      delete_blob_encoded_rows!
     end
 
     # Persists one test's coverage. +coverage+ is { relative_path =>
@@ -148,6 +149,22 @@ module Riptide
     def connect!
       @db = open(@path)
       @pid = Process.pid
+    end
+
+    # TEMPORARY, remove once a real build has confirmed this ran clean in
+    # every stage's canonical store: a now-fixed bug in the native
+    # collector (ext/riptide/riptide_native.c) built source_file as
+    # ASCII-8BIT. The sqlite3 gem binds an ASCII-8BIT string as a BLOB
+    # parameter, not TEXT, and SQLite never considers a TEXT value equal
+    # to a BLOB of the same bytes, so every row that bug wrote is
+    # permanently unreachable by dependencies_for_file's WHERE source_file
+    # = ? (an ordinary, TEXT-bound Ruby string) or by record's own
+    # ON CONFLICT(test_id, source_file) upsert. Pure dead weight, safe to
+    # delete unconditionally: nothing can ever query these rows back out.
+    # Runs once per canonical Store open, before any forking, so no
+    # concurrent-writer race with worker connections.
+    def delete_blob_encoded_rows!
+      db.execute("DELETE FROM test_dependencies WHERE typeof(source_file) = 'blob'")
     end
 
     # Gives this worker a private file instead of the shared one, so
