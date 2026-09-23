@@ -43,6 +43,23 @@ module Riptide
 
         assert_equal "0 tests", decision.summary
       end
+
+      def test_a_full_suite_decision_runs_every_test
+        decision = Decision.new(mode: :full, reason: "no dependency map yet", selected: [])
+
+        assert decision.runs?("WidgetTest", "test_a")
+        assert decision.runs?("AnythingTest", "test_whatever")
+      end
+
+      def test_a_selected_decision_only_runs_what_it_selected
+        decision = Decision.new(mode: :selected, reason: nil, selected: [
+          { class_name: "WidgetTest", method_name: "test_a", reasons: ["widget.rb changed within a covered range"] }
+        ])
+
+        assert decision.runs?("WidgetTest", "test_a")
+        refute decision.runs?("WidgetTest", "test_b")
+        refute decision.runs?("GadgetTest", "test_a")
+      end
     end
   end
 end

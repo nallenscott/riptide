@@ -78,6 +78,33 @@ module Riptide
         end
       end
 
+      def test_wire_skips_recording_when_should_record_returns_false
+        in_repo do |root|
+          write_and_commit(root, "app/models/widget.rb", "class Widget\nend\n", message: "base")
+          store = Store.new(path: ":memory:")
+
+          MinitestHooks.wire(store: store, root: root, should_record: ->(_class_name, _method_name) { false })
+          MinitestHooks.on_capture.call("WidgetTest", "test_a", { "app/models/widget.rb" => Set[1] })
+
+          assert_empty store.dependencies_for_file("app/models/widget.rb")
+        end
+      end
+
+      def test_wire_records_only_the_tests_should_record_allows
+        in_repo do |root|
+          write_and_commit(root, "app/models/widget.rb", "class Widget\nend\n", message: "base")
+          store = Store.new(path: ":memory:")
+
+          MinitestHooks.wire(store: store, root: root, should_record: ->(class_name, _method_name) { class_name == "WidgetTest" })
+          MinitestHooks.on_capture.call("WidgetTest", "test_a", { "app/models/widget.rb" => Set[1] })
+          MinitestHooks.on_capture.call("GadgetTest", "test_a", { "app/models/widget.rb" => Set[1] })
+
+          deps = store.dependencies_for_file("app/models/widget.rb")
+
+          assert_equal ["WidgetTest"], deps.map { |d| d[:class_name] }
+        end
+      end
+
       def test_wire_skips_tests_with_empty_coverage
         store = Store.new(path: ":memory:")
         MinitestHooks.wire(store: store, root: Dir.pwd)

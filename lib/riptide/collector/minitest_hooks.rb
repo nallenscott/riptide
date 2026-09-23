@@ -19,13 +19,21 @@ module Riptide
       # Called by the Minitest plugin (lib/minitest/riptide_plugin.rb),
       # the one place this gets wired outside this gem's test suite.
       #
+      # +should_record+, when given, decides whether a given (class_name,
+      # method_name)'s coverage actually gets written - nil records
+      # everything, matching a real run where every test that executes
+      # should have its coverage refreshed. The dry_run plugin path passes
+      # +decision.method(:runs?)+ so a test riptide wouldn't have selected
+      # doesn't have its record refreshed just because dry_run let it
+      # execute anyway (see Riptide::Selector::Decision#runs?).
+      #
       # Deliberately does not include this module into Minitest::Test.
       # This method also gets called directly from riptide's unit
       # tests to check the wiring itself, and Minitest::Test.include is a
       # global, irreversible mutation for the rest of the process, doing
       # it here once broke every other test in this gem's suite that
       # ran afterward. The plugin is the only place that calls include.
-      def self.wire(store:, root:)
+      def self.wire(store:, root:, should_record: nil)
         self.root = root
         # A file's blob sha can't change mid-run, the working tree is fixed
         # for the whole build, so a file every test in this process touches
@@ -34,6 +42,7 @@ module Riptide
         blob_sha_cache = {}
         self.on_capture = lambda do |class_name, method_name, coverage|
           next if coverage.empty?
+          next if should_record && !should_record.call(class_name, method_name)
 
           blob_shas = coverage.keys.to_h do |file|
             [file, blob_sha_cache[file] ||= Diff.blob_sha(File.join(root, file))]

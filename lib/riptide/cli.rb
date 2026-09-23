@@ -51,8 +51,8 @@ module Riptide
       store = Store.new(path: Riptide.configuration.store_path)
       load_test_files
       discovered = Riptide.discovered_tests_by_file(root: @root)
-      decision = store.empty? ? bootstrap_decision : compute_decision(store, discovered)
-      report(decision, discovered.values.flatten(1).size)
+      decision, base = Riptide.decide(store: store, root: @root, discovered_tests_by_file: discovered)
+      report(decision, base, discovered.values.flatten(1).size)
     end
 
     # Loading test files first, before deciding anything, is what gives
@@ -65,25 +65,19 @@ module Riptide
       discovered = Riptide.discovered_tests_by_file(root: @root)
       store.prune_except(discovered.values.flatten(1))
 
-      decision = store.empty? ? bootstrap_decision : compute_decision(store, discovered)
-      report(decision, discovered.values.flatten(1).size)
+      decision, base = Riptide.decide(store: store, root: @root, discovered_tests_by_file: discovered)
+      report(decision, base, discovered.values.flatten(1).size)
 
       Runner.new(decision: decision).apply
     end
 
-    def bootstrap_decision
-      puts "No dependency map found."
-      puts "Running full suite and building one..."
-      Selector::Decision.new(mode: :full, reason: "no dependency map yet", selected: [])
-    end
-
-    def compute_decision(store, discovered)
-      base = Riptide.default_base
-      puts "Comparing HEAD against #{base}"
-      Selector.new(store: store, root: @root, discovered_tests_by_file: discovered).select(base: base)
-    end
-
-    def report(decision, total)
+    def report(decision, base, total)
+      if base
+        puts "Comparing HEAD against #{base}"
+      else
+        puts "No dependency map found."
+        puts "Running full suite and building one..."
+      end
       puts "Selected: #{decision.summary(total: total)}"
     end
 

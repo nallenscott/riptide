@@ -55,5 +55,24 @@ module Riptide
         end
       end
     end
+
+    # What to run: a Decision, and the base it was decided against (nil for
+    # the bootstrap case below, there's nothing to compare against yet).
+    # Shared by the CLI and the Minitest plugin, the two places that need a
+    # decision, so an empty store or a computed base only has one
+    # definition to agree on, not two that can quietly drift apart.
+    #
+    # An empty store forces a full run and reports why, rather than
+    # comparing against base at all: everything for this app is unknown
+    # yet, not just the files in whatever diff happens to exist right now.
+    def decide(store:, root:, discovered_tests_by_file:)
+      if store.empty?
+        return [Selector::Decision.new(mode: :full, reason: "no dependency map yet", selected: []), nil]
+      end
+
+      base = default_base
+      decision = Selector.new(store: store, root: root, discovered_tests_by_file: discovered_tests_by_file).select(base: base)
+      [decision, base]
+    end
   end
 end

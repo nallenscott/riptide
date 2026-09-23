@@ -21,6 +21,24 @@ module Riptide
         lines = selected.map { |test| "  #{test[:class_name]}##{test[:method_name]}: #{test[:reasons].join(", ")}" }
         ([header] + lines).join("\n")
       end
+
+      # Whether this decision would actually execute the given test. Used
+      # by the Minitest plugin's dry_run path to gate which tests' coverage
+      # gets recorded: dry_run runs every test regardless of what got
+      # selected, so without this, a test riptide wouldn't have selected
+      # would still have its coverage refreshed, permanently erasing the
+      # "this file still differs from base" signal the next build would
+      # otherwise correctly see. Memoized: called once per test in the
+      # whole suite, not something to linear-scan +selected+ for each time.
+      def runs?(class_name, method_name)
+        mode == :full || selected_set.include?([class_name, method_name])
+      end
+
+      private
+
+      def selected_set
+        @selected_set ||= selected.map { |test| [test[:class_name], test[:method_name]] }.to_set
+      end
     end
 
     # +discovered_tests_by_file+ is { relative_path => [[class_name, method_name], ...] },
