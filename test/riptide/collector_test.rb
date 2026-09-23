@@ -5,6 +5,8 @@ require "tmpdir"
 
 module Riptide
   class CollectorTest < Minitest::Test
+    include RubyFixture
+
     def test_capture_records_lines_touched_within_root
       with_fixture(<<~RUBY) do |root|
         class CollectorFixtureA
@@ -177,21 +179,6 @@ module Riptide
           assert_equal expected, result["fixture.rb"]
         end
       end
-    end
-
-    private
-
-    def with_fixture(source)
-      Dir.mktmpdir do |root|
-        write_fixture(root, source)
-        yield root
-      end
-    end
-
-    def write_fixture(root, source)
-      fixture = File.join(root, "fixture.rb")
-      File.write(fixture, source)
-      load fixture
     end
   end
 end

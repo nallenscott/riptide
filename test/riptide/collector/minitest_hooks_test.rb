@@ -7,6 +7,7 @@ module Riptide
   class Collector
     class MinitestHooksTest < Minitest::Test
       include GitFixture
+      include RubyFixture
 
       def teardown
         MinitestHooks.root = nil
@@ -25,6 +26,39 @@ module Riptide
 
           assert_equal 1, deps.size
           assert_equal Diff.blob_sha(File.join(root, "app/models/widget.rb")), deps.first[:source_blob_sha]
+        end
+      end
+
+      # Collector's relative-path keys come from the native extension (C
+      # string slicing), not a Ruby String method, and previously came out
+      # ASCII-8BIT: byte-identical to an ordinary Ruby string but a
+      # different SQLite storage class (BLOB, not TEXT), which SQLite never
+      # considers equal to TEXT even for identical bytes. That silently
+      # broke the UNIQUE(test_id, source_file) upsert (a second capture of
+      # the same file produced a second row instead of updating the first)
+      # and broke every later `dependencies_for_file` lookup, permanently,
+      # since those pass an ordinary Ruby string. Recording twice for the
+      # same real Collector-produced key and asserting exactly one row
+      # catches a regression at the actual boundary where it broke, not
+      # just a Ruby-level String#encoding check.
+      def test_recording_the_same_real_collector_key_twice_updates_one_row_not_two
+        with_fixture(<<~RUBY) do |root|
+          class MinitestHooksEncodingFixture
+            def touch
+              1 + 1
+            end
+          end
+        RUBY
+          store = Store.new(path: ":memory:")
+          MinitestHooks.wire(store: store, root: root)
+
+          coverage = Collector.new(root: root).capture { MinitestHooksEncodingFixture.new.touch }
+          MinitestHooks.on_capture.call("WidgetTest", "test_a", coverage)
+          MinitestHooks.on_capture.call("WidgetTest", "test_a", coverage)
+
+          deps = store.dependencies_for_file(coverage.keys.first)
+
+          assert_equal 1, deps.size
         end
       end
 

@@ -16,6 +16,7 @@
 
 #include <ruby.h>
 #include <ruby/debug.h>
+#include <ruby/encoding.h>
 
 static VALUE mRiptide;
 static VALUE cCollector;
@@ -155,7 +156,20 @@ classify(riptide_native_collector_t *data, VALUE path)
 
     if (path_len > root_len &&
         memcmp(RSTRING_PTR(path), RSTRING_PTR(data->root_with_slash), root_len) == 0) {
-        result = rb_str_new(RSTRING_PTR(path) + root_len, path_len - root_len);
+        // rb_str_new leaves the result ASCII-8BIT regardless of the source
+        // string's own encoding. The sqlite3 gem binds an ASCII-8BIT Ruby
+        // string as a BLOB parameter, not TEXT -- confirmed directly: two
+        // rows with byte-identical source_file content, one inserted via a
+        // normal (UTF-8) Ruby string and one via this code unfixed, come
+        // back from SQLite as text and blob respectively, and SQLite never
+        // considers a TEXT value equal to a BLOB of the same bytes, so the
+        // UNIQUE(test_id, source_file) constraint silently failed to match,
+        // and every WHERE source_file = ? lookup elsewhere in riptide
+        // (using ordinary Ruby strings) permanently missed rows this wrote.
+        // rb_enc_str_new keeps the encoding path itself already has,
+        // matching what the pure-Ruby String#delete_prefix this replaced
+        // did automatically.
+        result = rb_enc_str_new(RSTRING_PTR(path) + root_len, path_len - root_len, rb_enc_get(path));
         rb_str_freeze(result);
     } else {
         result = Qfalse;

@@ -31,3 +31,21 @@ module GitFixture
     system("git", "-C", root, "commit", "-q", "-m", message, exception: true)
   end
 end
+
+module RubyFixture
+  # Writes +source+ to fixture.rb under a fresh tmpdir, loads it, and
+  # yields the root. For tests that need real, loadable Ruby source but
+  # don't need it under git (see GitFixture for that).
+  def with_fixture(source)
+    Dir.mktmpdir do |root|
+      write_fixture(root, source)
+      yield root
+    end
+  end
+
+  def write_fixture(root, source)
+    fixture = File.join(root, "fixture.rb")
+    File.write(fixture, source)
+    load fixture
+  end
+end
