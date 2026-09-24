@@ -203,44 +203,6 @@ module Riptide
       end
     end
 
-    # TEMPORARY: covers Store#delete_blob_encoded_rows!, itself temporary
-    # (see its own comment) -- remove this test alongside it once removed.
-    # Seeds a row the way the real bug produced one: an ASCII-8BIT
-    # source_file, which the sqlite3 gem binds as a BLOB, sitting
-    # alongside the correct TEXT row for the same (test_id, source_file)
-    # pair (a real UNIQUE constraint violation if SQLite considered them
-    # equal, which it doesn't -- confirmed directly, that's the bug).
-    # Reopening the same canonical file is what a real build does on its
-    # next run, and is what actually triggers the cleanup.
-    def test_reopening_a_store_deletes_pre_existing_blob_encoded_rows
-      Dir.mktmpdir do |dir|
-        path = File.join(dir, "riptide.db")
-        seed = Store.new(path: path)
-        seed.record(
-          class_name: "ProviderTest", method_name: "test_a",
-          coverage: { "app/models/provider.rb" => Set[1] },
-          blob_shas: { "app/models/provider.rb" => "sha-a" }
-        )
-        test_id = seed.send(:db).execute(
-          "SELECT id FROM tests WHERE class_name = ? AND method_name = ?", ["ProviderTest", "test_a"]
-        ).first.first
-        seed.send(:db).execute(
-          "INSERT INTO test_dependencies (test_id, source_file, source_blob_sha, covered_lines) VALUES (?, ?, ?, ?)",
-          [test_id, "app/models/provider.rb".dup.force_encoding(Encoding::ASCII_8BIT), "sha-b", "[[2,2]]"]
-        )
-
-        reopened = Store.new(path: path)
-
-        # dependencies_for_file can't tell us whether the blob row was
-        # actually deleted or just, as always, invisible to its own
-        # TEXT-bound WHERE clause -- that's the bug either way. Count the
-        # raw rows directly instead.
-        remaining = reopened.send(:db).execute("SELECT typeof(source_file), source_blob_sha FROM test_dependencies")
-
-        assert_equal [["text", "sha-a"]], remaining
-      end
-    end
-
     def test_reset_wipes_every_test_and_dependency_row
       @store.record(
         class_name: "ProviderTest", method_name: "test_a",

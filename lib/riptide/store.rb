@@ -40,10 +40,7 @@ module Riptide
     def initialize(path:)
       @path = path
       FileUtils.mkdir_p(File.dirname(path)) unless path == ":memory:"
-      log_file_state_before_connecting!
       connect!
-      log_row_counts_immediately_after_connecting!
-      delete_blob_encoded_rows!
     end
 
     # Persists one test's coverage. +coverage+ is { relative_path =>
@@ -151,51 +148,6 @@ module Riptide
     def connect!
       @db = open(@path)
       @pid = Process.pid
-    end
-
-    # TEMPORARY, remove once a real build has settled whether this
-    # canonical file persists across separate CI builds or gets recreated
-    # fresh each build -- that's an open question about whether the CI
-    # workspace directory is actually a stable, persistent mount
-    # build-to-build, not something inferrable from a database snapshot
-    # pulled after the fact. #connect! creates the file if it's missing,
-    # so existence/age/size have to be checked here, first, and printed
-    # with a stable, greppable prefix so the answer comes straight out of
-    # the real Jenkins log for this exact process.
-    def log_file_state_before_connecting!
-      return if @path == ":memory:"
-
-      existed_before = File.exist?(@path)
-      warn "[riptide-persistence-check] path=#{@path} existed_before_this_process=#{existed_before} " \
-           "mtime=#{existed_before ? File.mtime(@path).utc.iso8601(3) : "n/a"} " \
-           "size_bytes=#{existed_before ? File.size(@path) : "n/a"} " \
-           "process_started_at=#{Time.now.utc.iso8601(3)}"
-    end
-
-    # Companion to the above: row counts as of the moment this process
-    # connected, before anything this build's own tests do can add to
-    # them. A nonzero count here, on a build whose own tests haven't run
-    # yet, is direct evidence prior builds' data carried over.
-    def log_row_counts_immediately_after_connecting!
-      tests = db.execute("SELECT COUNT(*) FROM tests").first.first
-      deps = db.execute("SELECT COUNT(*) FROM test_dependencies").first.first
-      warn "[riptide-persistence-check] path=#{@path} tests_at_connect=#{tests} test_dependencies_at_connect=#{deps}"
-    end
-
-    # TEMPORARY, remove once a real build has confirmed this ran clean in
-    # every stage's canonical store: a now-fixed bug in the native
-    # collector (ext/riptide/riptide_native.c) built source_file as
-    # ASCII-8BIT. The sqlite3 gem binds an ASCII-8BIT string as a BLOB
-    # parameter, not TEXT, and SQLite never considers a TEXT value equal
-    # to a BLOB of the same bytes, so every row that bug wrote is
-    # permanently unreachable by dependencies_for_file's WHERE source_file
-    # = ? (an ordinary, TEXT-bound Ruby string) or by record's own
-    # ON CONFLICT(test_id, source_file) upsert. Pure dead weight, safe to
-    # delete unconditionally: nothing can ever query these rows back out.
-    # Runs once per canonical Store open, before any forking, so no
-    # concurrent-writer race with worker connections.
-    def delete_blob_encoded_rows!
-      db.execute("DELETE FROM test_dependencies WHERE typeof(source_file) = 'blob'")
     end
 
     # Gives this worker a private file instead of the shared one, so
