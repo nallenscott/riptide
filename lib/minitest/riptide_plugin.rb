@@ -34,7 +34,16 @@ module Minitest
 
     root = Dir.pwd
     store = Riptide::Store.new(path: Riptide.configuration.store_path)
-    plan = riptide_plan(store, root) if Riptide.configuration.dry_run
+
+    # Unconditional, not tied to dry_run: pruning is bookkeeping against
+    # "every test that exists right now," not part of the run/no-run
+    # decision itself, and this plugin path (unlike Riptide::CLI's own
+    # run command, which already pruned) is the one every real build
+    # actually goes through.
+    discovered = Riptide.discovered_tests_by_file(root: root)
+    Riptide.prune_stale_tests!(store: store, discovered_tests_by_file: discovered)
+
+    plan = riptide_plan(store, root, discovered) if Riptide.configuration.dry_run
 
     Riptide::Collector::MinitestHooks.wire(store: store, root: root, should_record: plan&.decision&.method(:runs?))
     Minitest::Test.include(Riptide::Collector::MinitestHooks)
@@ -46,10 +55,9 @@ module Minitest
   # commands use; by the time this hook fires, Minitest has discovered
   # every test in this process, so there's nothing to boot or load a
   # second time.
-  def self.riptide_plan(store, root)
-    discovered = Riptide.discovered_tests_by_file(root: root)
+  def self.riptide_plan(store, root, discovered)
     decision, base = Riptide.decide(store: store, root: root, discovered_tests_by_file: discovered)
-    Plan.new(decision: decision, base: base, total: discovered.values.flatten(1).size)
+    Plan.new(decision: decision, base: base, total: Riptide.known_tests(discovered).size)
   end
 
   # Doesn't filter or skip anything itself, only prints. base is nil for

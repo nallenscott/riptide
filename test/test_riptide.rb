@@ -61,4 +61,29 @@ class TestRiptide < Minitest::Test
       assert_equal base_sha, base
     end
   end
+
+  def test_known_tests_flattens_discovered_tests_by_file
+    discovered = {
+      "app/models/widget.rb" => [["WidgetTest", "test_a"], ["WidgetTest", "test_b"]],
+      "app/models/gadget.rb" => [["GadgetTest", "test_a"]]
+    }
+
+    assert_equal(
+      [["WidgetTest", "test_a"], ["WidgetTest", "test_b"], ["GadgetTest", "test_a"]],
+      Riptide.known_tests(discovered)
+    )
+  end
+
+  def test_prune_stale_tests_removes_rows_for_tests_no_longer_discovered
+    store = Riptide::Store.new(path: ":memory:")
+    store.record(
+      class_name: "WidgetTest", method_name: "test_renamed",
+      coverage: { "app/models/widget.rb" => Set[1] },
+      blob_shas: { "app/models/widget.rb" => "sha-a" }
+    )
+
+    Riptide.prune_stale_tests!(store: store, discovered_tests_by_file: { "app/models/widget.rb" => [["WidgetTest", "test_current"]] })
+
+    assert_empty store.dependencies_for_file("app/models/widget.rb")
+  end
 end

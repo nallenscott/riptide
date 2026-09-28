@@ -52,7 +52,7 @@ module Riptide
       load_test_files
       discovered = Riptide.discovered_tests_by_file(root: @root)
       decision, base = Riptide.decide(store: store, root: @root, discovered_tests_by_file: discovered)
-      report(decision, base, discovered.values.flatten(1).size)
+      report(decision, base, Riptide.known_tests(discovered).size)
     end
 
     # Loading test files first, before deciding anything, is what gives
@@ -63,10 +63,10 @@ module Riptide
     def perform_run(store)
       load_test_files
       discovered = Riptide.discovered_tests_by_file(root: @root)
-      store.prune_except(discovered.values.flatten(1))
+      Riptide.prune_stale_tests!(store: store, discovered_tests_by_file: discovered)
 
       decision, base = Riptide.decide(store: store, root: @root, discovered_tests_by_file: discovered)
-      report(decision, base, discovered.values.flatten(1).size)
+      report(decision, base, Riptide.known_tests(discovered).size)
 
       Runner.new(decision: decision).apply
     end

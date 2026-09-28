@@ -56,6 +56,27 @@ module Riptide
       end
     end
 
+    # The flat [class_name, method_name] pairs discovered_tests_by_file
+    # groups by file. Shared by prune_stale_tests! and by the CLI and the
+    # Minitest plugin's own total counts, the three places that otherwise
+    # each re-flatten this by hand.
+    def known_tests(discovered_tests_by_file)
+      discovered_tests_by_file.values.flatten(1)
+    end
+
+    # Deletes every Store row for a test not in discovered_tests_by_file --
+    # a renamed or deleted test's rows, which nothing else ever cleans up.
+    # Kept separate from discovered_tests_by_file itself: discovery is a
+    # pure read, this is a deliberate mutation, and merging them would mean
+    # anyone calling discover for an unrelated reason silently triggers a
+    # deletion. Safe to call unconditionally as long as
+    # discovered_tests_by_file reflects this process's full, unsharded
+    # suite, not a partial or filtered view -- a scoped list here would
+    # prune tests that still exist, just weren't in view this run.
+    def prune_stale_tests!(store:, discovered_tests_by_file:)
+      store.prune_except(known_tests(discovered_tests_by_file))
+    end
+
     # What to run: a Decision, and the base it was decided against (nil for
     # the bootstrap case below, there's nothing to compare against yet).
     # Shared by the CLI and the Minitest plugin, the two places that need a
