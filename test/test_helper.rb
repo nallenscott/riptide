@@ -2,10 +2,16 @@
 
 $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 require "riptide"
-
 require "minitest/autorun"
 require "tmpdir"
 require "fileutils"
+
+# The tracer is process-wide, so the suite installs it once, rooted where
+# TracedFixture writes the source it loads. It's a git repository because
+# riptide only records files git knows about.
+TRACE_ROOT = File.realpath(Dir.mktmpdir("riptide-trace"))
+system("git", "init", "-q", TRACE_ROOT, exception: true)
+Riptide::Tracer.install(TRACE_ROOT)
 
 module GitFixture
   def in_repo
@@ -32,20 +38,25 @@ module GitFixture
   end
 end
 
-module RubyFixture
-  # Writes +source+ to fixture.rb under a fresh tmpdir, loads it, and
-  # yields the root. For tests that need real, loadable Ruby source but
-  # don't need it under git (see GitFixture for that).
-  def with_fixture(source)
-    Dir.mktmpdir do |root|
-      write_fixture(root, source)
-      yield root
-    end
+module TracedFixture
+  # Writes +source+ under the tracer's root and loads it, so its lines are
+  # in scope. Returns the path relative to that root.
+  def load_traced(relative, source)
+    full = File.join(TRACE_ROOT, relative)
+    FileUtils.mkdir_p(File.dirname(full))
+    File.write(full, source)
+    load full
+    relative
   end
 
-  def write_fixture(root, source)
-    fixture = File.join(root, "fixture.rb")
-    File.write(fixture, source)
-    load fixture
+  # The lines a block ran, as a closed window.
+  def traced
+    Riptide::Tracer.open_window
+    begin
+      yield
+    ensure
+      lines = Riptide::Tracer.close_window.lines
+    end
+    lines
   end
 end

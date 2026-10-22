@@ -1,75 +1,44 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "stringio"
+require "riptide/cli"
 
 module Riptide
   class CLITest < Minitest::Test
-    include GitFixture
+    def test_publish_then_fetch_through_a_remote
+      Dir.mktmpdir do |dir|
+        remote = File.join(dir, "remote.git")
+        system("git", "init", "-q", "--bare", remote, exception: true)
+        a = File.join(dir, "a")
+        b = File.join(dir, "b")
+        [a, b].each { |clone| system("git", "clone", "-q", remote, clone, exception: true, err: File::NULL) }
 
-    def test_call_returns_an_error_for_a_not_yet_implemented_command
-      _, err = capture_io { assert_equal 1, CLI.new(["why"]).call }
+        writer = Store.new(root: a, suite: "unit", log_dir: File.join(a, "tmp/riptide/unit"))
+        writer.append_run(Store::Run.new(test: %w[ATest test_a], at: 1.0, passed: true, sets: [], inputs: {}))
 
-      assert_match(/not yet implemented/, err)
-    end
+        out = StringIO.new
+        assert_equal 0, CLI.new(["publish", "--suite", "unit", "--root", a], out: out).call
+        assert_match %r{published refs/riptide/unit}, out.string
+        assert_equal 0, CLI.new(["fetch", "--suite", "unit", "--root", b]).call
 
-    def test_call_returns_an_error_for_an_unknown_command
-      _, err = capture_io { assert_equal 1, CLI.new(["bogus"]).call }
-
-      assert_match(/unknown command/, err)
-    end
-
-    def test_load_test_files_skips_files_matching_test_exclude_patterns
-      Dir.mktmpdir do |root|
-        FileUtils.mkdir_p(File.join(root, "test/controllers"))
-        FileUtils.mkdir_p(File.join(root, "test/models"))
-        File.write(File.join(root, "test/test_helper.rb"), "require 'minitest/autorun'\n")
-        File.write(File.join(root, "test/controllers/widget_controller_test.rb"), <<~RUBY)
-          Object.const_set(:CLIFixtureControllerTest, Class.new(Minitest::Test) { def test_a; end })
-        RUBY
-        File.write(File.join(root, "test/models/widget_test.rb"), <<~RUBY)
-          Object.const_set(:CLIFixtureModelTest, Class.new(Minitest::Test) { def test_a; end })
-        RUBY
-
-        Riptide.configuration.test_exclude_patterns = [%r{test/controllers}]
-
-        CLI.new([], root: root).send(:load_test_files)
-
-        assert defined?(CLIFixtureModelTest)
-        refute defined?(CLIFixtureControllerTest)
-      ensure
-        Riptide.configuration.test_exclude_patterns = []
-        [:CLIFixtureModelTest, :CLIFixtureControllerTest].each do |const|
-          next unless Object.const_defined?(const)
-
-          Minitest::Runnable.runnables.delete(Object.const_get(const))
-          Object.send(:remove_const, const)
-        end
+        reader = Store.new(root: b, suite: "unit", log_dir: File.join(b, "tmp/riptide/unit"))
+        assert_equal [%w[ATest test_a]], reader.runs([%w[ATest test_a]]).keys
       end
     end
 
-    def test_plan_command_reports_a_decision_without_touching_runnable_methods
-      in_repo do |root|
-        write_and_commit(root, "test/test_helper.rb", "require 'minitest/autorun'\n", message: "base")
-        write_and_commit(root, "test/models/plan_fixture_test.rb", <<~RUBY, message: "add test")
-          require "test_helper"
-          Object.const_set(:CLIPlanFixtureTest, Class.new(Minitest::Test) { def test_a; end })
-        RUBY
+    def test_a_missing_suite_is_an_error
+      err = StringIO.new
 
-        Riptide.configuration.test_glob = "test/models/**/*_test.rb"
-        Riptide.configuration.store_path = File.join(root, "tmp", "riptide.db")
+      assert_equal 1, CLI.new(["publish"], err: err).call
+      assert_match(/--suite/, err.string)
+    end
 
-        out, = capture_io { CLI.new(["plan"], root: root).send(:plan_command) }
+    def test_an_unknown_command_prints_usage
+      err = StringIO.new
 
-        assert_match(/No dependency map found/, out)
-        assert_equal ["test_a"], CLIPlanFixtureTest.runnable_methods
-      ensure
-        Riptide.configuration.test_glob = "test/**/*_test.rb"
-        Riptide.configuration.store_path = "tmp/riptide/riptide.db"
-        if defined?(CLIPlanFixtureTest)
-          Minitest::Runnable.runnables.delete(CLIPlanFixtureTest)
-          Object.send(:remove_const, :CLIPlanFixtureTest)
-        end
-      end
+      assert_equal 1, CLI.new(["nope", "--suite", "unit"], err: err).call
+      assert_match(/usage/, err.string)
     end
   end
 end

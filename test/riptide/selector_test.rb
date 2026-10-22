@@ -1,256 +1,223 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require "tmpdir"
-require "fileutils"
 
 module Riptide
   class SelectorTest < Minitest::Test
     include GitFixture
 
-    def setup
-      @store = Store.new(path: ":memory:")
-    end
+    WIDGET = <<~RUBY
+      class Widget
+        LIMIT = 5
 
-    def test_selects_only_the_test_whose_covered_range_was_actually_touched
+        def limit
+          LIMIT
+        end
+
+        def other
+          :other
+        end
+      end
+    RUBY
+
+    TEST = %w[WidgetTest test_limit].freeze
+
+    # A repository with widget.rb committed, a local store, and a helper to
+    # record a run against whatever widget.rb is right now.
+    def with_widget
       in_repo do |root|
-        write_and_commit(root, "app/models/provider.rb", provider_source, message: "base")
-        base_sha = Diff.blob_sha(File.join(root, "app/models/provider.rb"))
-
-        @store.record(
-          class_name: "ProviderTest", method_name: "test_a",
-          coverage: { "app/models/provider.rb" => Set[2, 3, 4] },
-          blob_shas: { "app/models/provider.rb" => base_sha }
-        )
-        @store.record(
-          class_name: "ProviderTest", method_name: "test_b",
-          coverage: { "app/models/provider.rb" => Set[7, 8, 9] },
-          blob_shas: { "app/models/provider.rb" => base_sha }
-        )
-
-        write_and_commit(root, "app/models/provider.rb", provider_source_with_method_b_changed, message: "edit")
-
-        decision = Selector.new(store: @store, root: root).select(base: "HEAD~1", head: "HEAD")
-
-        assert_equal :selected, decision.mode
-        assert_equal [["ProviderTest", "test_b"]], decision.selected.map { |s| [s[:class_name], s[:method_name]] }
+        write_and_commit(root, "app/widget.rb", WIDGET, message: "widget")
+        @root = root
+        @store = Store.new(root: root, suite: "unit", log_dir: File.join(root, "tmp/riptide"))
+        yield
       end
     end
 
-    def test_a_file_with_zero_historical_coverage_forces_a_full_run
-      in_repo do |root|
-        write_and_commit(root, "app/models/untracked.rb", "class Untracked\n  def a\n    1\n  end\nend\n", message: "base")
-        write_and_commit(root, "app/models/untracked.rb", "class Untracked\n  def a\n    2\n  end\nend\n", message: "edit")
+    def sha = Diff.blob_sha(File.join(@root, "app/widget.rb"))
 
-        decision = Selector.new(store: @store, root: root).select(base: "HEAD~1", head: "HEAD")
+    def record(facets = { "methods" => ["Widget#limit"] }, test: TEST, passed: true, at: 1.0, env: {})
+      env_set = Store.set_id(env)
+      @store.append_set(env_set, env)
+      @store.append_run(Store::Run.new(test: test, at: at, passed: passed, sets: [env_set],
+                                       inputs: { "app/widget.rb" => { "sha" => sha }.merge(facets) }))
+    end
 
-        assert_equal :full, decision.mode
-        assert_match(/no historical coverage/, decision.reason)
+    def edit(from, to)
+      path = File.join(@root, "app/widget.rb")
+      File.write(path, File.read(path).sub(from, to))
+    end
+
+    def reasons(tests = [TEST], listings: {})
+      layout = Layout.new(root: @root)
+      analyzer = Analyzer.new(layout: layout, blobs: @store.method(:read_blob), load_facts: @store.method(:load_facts))
+      Selector.new(store: @store, analyzer: analyzer, root: @root, tests: tests, listing: ->(pattern) { listings[pattern] }).select.selected.map { |entry| entry[:reason] }
+    end
+
+    def test_a_test_with_no_recorded_run_is_selected
+      with_widget { assert_equal ["no recorded run"], reasons }
+    end
+
+    def test_an_unchanged_tree_selects_nothing
+      with_widget do
+        record
+        assert_empty reasons
       end
     end
 
-    def test_a_fallback_pattern_file_forces_a_full_run_even_with_no_store_data
-      in_repo do |root|
-        write_and_commit(root, "Gemfile", "source 'https://rubygems.org'\n", message: "base")
-        write_and_commit(root, "Gemfile", "source 'https://rubygems.org'\ngem 'rails'\n", message: "edit")
-
-        decision = Selector.new(store: @store, root: root).select(base: "HEAD~1", head: "HEAD")
-
-        assert_equal :full, decision.mode
-        assert_match(/fallback pattern/, decision.reason)
+    def test_a_test_that_failed_last_time_runs_again
+      with_widget do
+        record(passed: false)
+        assert_equal ["failed the last time it ran"], reasons
       end
     end
 
-    def test_a_file_outside_source_patterns_does_not_force_a_full_run_despite_no_history
-      Riptide.configuration.source_patterns = ["app/**/*.rb"]
-      in_repo do |root|
-        write_and_commit(root, "Rakefile", "task :default\n", message: "base")
-        write_and_commit(root, "Rakefile", "task :default do\nend\n", message: "edit")
+    def test_editing_a_method_the_test_ran_selects_it
+      with_widget do
+        record
+        edit("    LIMIT\n", "    LIMIT + 1\n")
+        assert_equal ["app/widget.rb changed Widget#limit"], reasons
+      end
+    end
 
-        decision = Selector.new(store: @store, root: root).select(base: "HEAD~1", head: "HEAD")
+    def test_editing_a_method_the_test_never_ran_selects_nothing
+      with_widget do
+        record
+        edit(":other", ":changed")
+        assert_empty reasons
+      end
+    end
 
-        assert_equal :selected, decision.mode
+    def test_changing_a_method_header_selects_tests_that_ran_it
+      with_widget do
+        record
+        edit("def limit", "def limit(scale = 1)")
+        assert_equal ["app/widget.rb changed Widget#limit"], reasons
+      end
+    end
+
+    def test_changing_a_constant_selects_tests_that_referenced_it
+      with_widget do
+        record({ "constants" => ["Widget::LIMIT"] })
+        record({ "methods" => ["Widget#other"] }, test: %w[WidgetTest test_other])
+        edit("LIMIT = 5", "LIMIT = 6")
+
+        assert_equal ["app/widget.rb changed Widget::LIMIT"], reasons([TEST, %w[WidgetTest test_other]])
+      end
+    end
+
+    def test_a_declaration_selects_tests_that_used_the_class
+      with_widget do
+        record({ "owners" => ["Widget"] })
+        edit("  LIMIT = 5\n", "  LIMIT = 5\n  validates :name\n")
+        assert_equal ["app/widget.rb changed Widget"], reasons
+      end
+    end
+
+    def test_a_line_shift_alone_selects_nothing
+      with_widget do
+        record
+        edit("class Widget\n", "# widgets\n\nclass Widget\n")
+        assert_empty reasons
+      end
+    end
+
+    def test_a_changed_fallback_file_selects_the_test
+      with_widget do
+        write_and_commit(@root, "Gemfile.lock", "old\n", message: "lock")
+        record(env: { "Gemfile.lock" => { "sha" => Diff.blob_sha(File.join(@root, "Gemfile.lock")), "whole" => true } })
+        File.write(File.join(@root, "Gemfile.lock"), "new\n")
+
+        assert_equal ["Gemfile.lock changed as a whole"], reasons
+      end
+    end
+
+    def test_a_deleted_dependency_selects_the_test
+      with_widget do
+        record
+        File.delete(File.join(@root, "app/widget.rb"))
+        assert_equal ["app/widget.rb was deleted"], reasons
+      end
+    end
+
+    def test_a_recorded_version_the_repository_lacks_selects_the_test
+      with_widget do
+        @store.append_run(Store::Run.new(test: TEST, at: 1.0, passed: true, sets: [],
+                                         inputs: { "app/widget.rb" => { "sha" => "f" * 40, "methods" => ["Widget#limit"] } }))
+        assert_match(/isn't in this repository/, reasons.first)
+      end
+    end
+
+    def test_an_older_run_that_matches_the_tree_exactly_skips_the_test
+      with_widget do
+        record(at: 1.0)
+        edit("LIMIT = 5", "LIMIT = 10")
+        record(at: 2.0)
+        edit("LIMIT = 10", "LIMIT = 5")
+
+        assert_empty reasons
+      end
+    end
+
+    def test_a_top_level_change_selects_the_whole_suite
+      with_widget do
+        write_and_commit(@root, "test/test_helper.rb", "require 'minitest'\n", message: "helper")
+        helper_sha = Diff.blob_sha(File.join(@root, "test/test_helper.rb"))
+        record(env: { "test/test_helper.rb" => { "sha" => helper_sha } })
+        record({ "methods" => ["Widget#other"] }, test: %w[WidgetTest test_other], env: {})
+        File.write(File.join(@root, "test/test_helper.rb"), "require 'minitest/autorun'\n")
+
+        assert_equal ["test/test_helper.rb changed top-level code"] * 2, reasons([TEST, %w[WidgetTest test_other]])
+      end
+    end
+
+    # Rails sets default_internal to UTF-8, which makes writing raw bytes to a
+    # text file convert them.
+    def test_files_with_non_ascii_content_are_compared_as_text
+      internal = Encoding.default_internal
+      quietly { Encoding.default_internal = Encoding::UTF_8 }
+      with_widget do
+        write_and_commit(@root, "app/widget.rb", WIDGET.sub("class Widget", "# Widgets – the café kind\nclass Widget"), message: "accents")
+        record
+        edit("    LIMIT\n", "    LIMIT + 1 # “more”\n")
+
+        assert_equal ["app/widget.rb changed Widget#limit"], reasons
       end
     ensure
-      Riptide.configuration.source_patterns = []
+      quietly { Encoding.default_internal = internal }
     end
 
-    def test_a_file_inside_source_patterns_still_forces_a_full_run_with_no_history
-      Riptide.configuration.source_patterns = ["app/**/*.rb"]
-      in_repo do |root|
-        write_and_commit(root, "app/models/untracked.rb", "class Untracked\n  def a\n    1\n  end\nend\n", message: "base")
-        write_and_commit(root, "app/models/untracked.rb", "class Untracked\n  def a\n    2\n  end\nend\n", message: "edit")
-
-        decision = Selector.new(store: @store, root: root).select(base: "HEAD~1", head: "HEAD")
-
-        assert_equal :full, decision.mode
-        assert_match(/no historical coverage/, decision.reason)
-      end
+    # Ruby warns about setting default_internal, which is the point here.
+    def quietly
+      verbose = $VERBOSE
+      $VERBOSE = nil
+      yield
     ensure
-      Riptide.configuration.source_patterns = []
+      $VERBOSE = verbose
     end
 
-    def test_a_pure_rename_with_prior_coverage_does_not_treat_the_test_as_newly_discovered
-      in_repo do |root|
-        write_and_commit(root, "test/models/provider_test.rb", provider_test_source, message: "base")
-        base_sha = Diff.blob_sha(File.join(root, "test/models/provider_test.rb"))
-        @store.record(
-          class_name: "ProviderTest", method_name: "test_a",
-          coverage: { "test/models/provider_test.rb" => Set[2, 3, 4] },
-          blob_shas: { "test/models/provider_test.rb" => base_sha }
-        )
-
-        FileUtils.mv(
-          File.join(root, "test/models/provider_test.rb"),
-          File.join(root, "test/models/renamed_provider_test.rb")
-        )
-        commit(root, "rename, no content change")
-
-        discovered = { "test/models/renamed_provider_test.rb" => [%w[ProviderTest test_a]] }
-        decision = Selector.new(store: @store, root: root, discovered_tests_by_file: discovered)
-                            .select(base: "HEAD~1", head: "HEAD")
-
-        assert_equal :selected, decision.mode
-        assert_empty decision.selected
+    def test_a_run_whose_shared_set_is_missing_is_selected
+      with_widget do
+        @store.append_run(Store::Run.new(test: TEST, at: 1.0, passed: true, sets: ["0" * 16],
+                                         inputs: { "app/widget.rb" => { "sha" => sha, "methods" => ["Widget#limit"] } }))
+        assert_equal ["a shared set it depended on isn't available"], reasons
       end
     end
 
-    def test_a_brand_new_file_does_not_force_a_full_run
-      in_repo do |root|
-        write_and_commit(root, "app/models/provider.rb", provider_source, message: "base")
-        base_sha = Diff.blob_sha(File.join(root, "app/models/provider.rb"))
-        @store.record(
-          class_name: "ProviderTest", method_name: "test_a",
-          coverage: { "app/models/provider.rb" => Set[2, 3, 4] },
-          blob_shas: { "app/models/provider.rb" => base_sha }
-        )
+    def test_a_new_file_matching_a_recorded_glob_selects_the_test
+      with_widget do
+        record(env: { "glob:test/support/**/*.rb" => { "sha" => "before" } })
 
-        write_and_commit(root, "app/models/brand_new.rb", "class BrandNew\nend\n", message: "add")
-
-        decision = Selector.new(store: @store, root: root).select(base: "HEAD~1", head: "HEAD")
-
-        assert_equal :selected, decision.mode
-        assert_empty decision.selected
+        assert_empty reasons(listings: { "test/support/**/*.rb" => "before" })
+        assert_equal ["files matching test/support/**/*.rb were added or removed"], reasons(listings: { "test/support/**/*.rb" => "after" })
       end
     end
 
-    def test_a_deleted_file_selects_its_known_tests_without_forcing_a_full_run
-      in_repo do |root|
-        write_and_commit(root, "app/models/provider.rb", provider_source, message: "base 1")
-        base_sha = Diff.blob_sha(File.join(root, "app/models/provider.rb"))
-        @store.record(
-          class_name: "ProviderTest", method_name: "test_a",
-          coverage: { "app/models/provider.rb" => Set[2, 3, 4] },
-          blob_shas: { "app/models/provider.rb" => base_sha }
-        )
-        # An unrelated, previously-tracked file, so this diff has something else
-        # to anchor "base" against besides the file being deleted.
-        write_and_commit(root, "app/models/other.rb", "class Other\nend\n", message: "base 2")
-
-        FileUtils.rm(File.join(root, "app/models/provider.rb"))
-        commit(root, "delete provider")
-
-        decision = Selector.new(store: @store, root: root).select(base: "HEAD~1", head: "HEAD")
-
-        assert_equal :selected, decision.mode
-        assert_equal [["ProviderTest", "test_a"]], decision.selected.map { |s| [s[:class_name], s[:method_name]] }
+    def test_a_file_that_no_longer_parses_selects_its_dependents
+      with_widget do
+        record
+        edit("def other", "def other(")
+        assert_equal ["app/widget.rb changed as a whole"], reasons
       end
     end
-
-    def test_a_new_test_method_in_a_modified_file_gets_selected_even_with_no_history
-      in_repo do |root|
-        write_and_commit(root, "test/models/provider_test.rb", provider_test_source, message: "base")
-        base_sha = Diff.blob_sha(File.join(root, "test/models/provider_test.rb"))
-        @store.record(
-          class_name: "ProviderTest", method_name: "test_a",
-          coverage: { "test/models/provider_test.rb" => Set[2, 3, 4] },
-          blob_shas: { "test/models/provider_test.rb" => base_sha }
-        )
-
-        write_and_commit(root, "test/models/provider_test.rb", provider_test_source_with_new_method, message: "add test_b")
-
-        discovered = { "test/models/provider_test.rb" => [%w[ProviderTest test_a], %w[ProviderTest test_b]] }
-        decision = Selector.new(store: @store, root: root, discovered_tests_by_file: discovered)
-                            .select(base: "HEAD~1", head: "HEAD")
-
-        assert_equal :selected, decision.mode
-        assert_includes decision.selected.map { |s| [s[:class_name], s[:method_name]] }, ["ProviderTest", "test_b"]
-      end
-    end
-
-    def test_an_already_known_test_does_not_get_redundantly_selected_by_discovery
-      in_repo do |root|
-        write_and_commit(root, "app/models/provider.rb", provider_source, message: "base")
-        base_sha = Diff.blob_sha(File.join(root, "app/models/provider.rb"))
-        @store.record(
-          class_name: "ProviderTest", method_name: "test_a",
-          coverage: { "app/models/provider.rb" => Set[2, 3, 4] },
-          blob_shas: { "app/models/provider.rb" => base_sha }
-        )
-        write_and_commit(root, "app/models/other.rb", "class Other\nend\n", message: "unrelated")
-
-        discovered = { "app/models/provider.rb" => [%w[ProviderTest test_a]] }
-        decision = Selector.new(store: @store, root: root, discovered_tests_by_file: discovered)
-                            .select(base: "HEAD~1", head: "HEAD")
-
-        assert_equal :selected, decision.mode
-        assert_empty decision.selected
-      end
-    end
-
-    private
-
-    def provider_test_source
-      <<~RUBY
-        class ProviderTest < Minitest::Test
-          def test_a
-            assert true
-          end
-        end
-      RUBY
-    end
-
-    def provider_test_source_with_new_method
-      <<~RUBY
-        class ProviderTest < Minitest::Test
-          def test_a
-            assert true
-          end
-
-          def test_b
-            assert true
-          end
-        end
-      RUBY
-    end
-
-    def provider_source
-      <<~RUBY
-        class Provider
-          def a
-            1
-          end
-
-          def b
-            2
-          end
-        end
-      RUBY
-    end
-
-    def provider_source_with_method_b_changed
-      <<~RUBY
-        class Provider
-          def a
-            1
-          end
-
-          def b
-            2 + 1
-          end
-        end
-      RUBY
-    end
-
   end
 end

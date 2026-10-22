@@ -1,52 +1,30 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "minitest/mock"
 
 module Riptide
   class RunnerTest < Minitest::Test
-    def test_apply_filters_runnables_down_to_the_selected_tests
-      fixture_a = build_fixture_class(:RunnerFixtureA, %i[test_x test_y])
-      fixture_b = build_fixture_class(:RunnerFixtureB, %i[test_z])
-
-      decision = Selector::Decision.new(
-        mode: :selected, reason: nil,
-        selected: [{ class_name: fixture_a.name, method_name: "test_x", reasons: [] }]
-      )
-
-      Runner.new(decision: decision).apply(runnables: [fixture_a, fixture_b])
-
-      assert_equal ["test_x"], fixture_a.runnable_methods
-      assert_equal [], fixture_b.runnable_methods
-    ensure
-      cleanup_fixture(:RunnerFixtureA)
-      cleanup_fixture(:RunnerFixtureB)
+    def fake_runnable(name)
+      Class.new { define_singleton_method(:name) { name } }
     end
 
-    def test_apply_leaves_runnables_untouched_in_full_mode
-      fixture = build_fixture_class(:RunnerFixtureFull, %i[test_x test_y])
+    def test_a_full_decision_leaves_runnables_alone
+      klass = fake_runnable("FullTest")
+      klass.define_singleton_method(:runnable_methods) { %w[test_a] }
+      Minitest::Runnable.stub(:runnables, [klass]) { Runner.new(decision: Selector::Decision.new(mode: :full, selected: [], total: 1)).apply }
 
-      decision = Selector::Decision.new(mode: :full, reason: "Gemfile changed", selected: [])
-
-      Runner.new(decision: decision).apply(runnables: [fixture])
-
-      assert_equal %w[test_x test_y], fixture.runnable_methods.sort
-    ensure
-      cleanup_fixture(:RunnerFixtureFull)
+      assert_equal %w[test_a], klass.runnable_methods
     end
 
-    private
+    def test_a_selected_decision_narrows_each_class_to_its_selected_methods
+      a = fake_runnable("ATest")
+      b = fake_runnable("BTest")
+      selected = [{ test: %w[ATest test_one], reason: "x" }]
+      Minitest::Runnable.stub(:runnables, [a, b]) { Runner.new(decision: Selector::Decision.new(mode: :selected, selected: selected, total: 3)).apply }
 
-    def build_fixture_class(const_name, method_names)
-      klass = Class.new(Minitest::Test) do
-        method_names.each { |m| define_method(m) {} }
-      end
-      Object.const_set(const_name, klass)
-    end
-
-    def cleanup_fixture(const_name)
-      klass = Object.const_get(const_name)
-      Minitest::Runnable.runnables.delete(klass)
-      Object.send(:remove_const, const_name)
+      assert_equal %w[test_one], a.runnable_methods
+      assert_empty b.runnable_methods
     end
   end
 end

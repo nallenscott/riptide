@@ -1,100 +1,59 @@
 # frozen_string_literal: true
 
+require "optparse"
+require "riptide"
+
 module Riptide
+  # `riptide fetch` before tests and `riptide publish` after them, outside
+  # the test process. Publishing writes to .git, so it runs wherever .git is
+  # writable and the remote's credential is available.
   class CLI
-    def initialize(argv, root: Dir.pwd)
-      @argv = argv
-      @root = root
+    USAGE = "usage: riptide fetch|publish --suite NAME [--remote NAME] [--log-dir DIR] [--root DIR] [--prune]"
+
+    def initialize(argv, out: $stdout, err: $stderr)
+      @argv = argv.dup
+      @out = out
+      @err = err
     end
 
-    # Returns nil for the normal run path, letting minitest/autorun's
-    # at_exit hook decide the process exit status once tests finish, or an
-    # integer for a command that doesn't get that far.
     def call
-      command, = @argv
+      command = @argv.shift
+      options = parse
+      store = Store.new(root: options[:root], suite: options[:suite], log_dir: options[:log_dir], remote: options[:remote])
 
       case command
-      when "run", nil
-        run_command
-        nil
-      when "rebuild"
-        rebuild_command
-        nil
-      when "plan"
-        plan_command
-        nil
-      when "why"
-        warn "riptide #{command}: not yet implemented"
-        1
+      when "fetch"
+        store.fetch
+        0
+      when "publish"
+        commit = store.publish(prune: options[:prune])
+        @out.puts "[riptide] published #{store.ref} at #{commit[0, 12]}"
+        0
       else
-        warn "riptide: unknown command #{command.inspect}"
+        @err.puts USAGE
         1
       end
+    rescue OptionParser::ParseError, Error => e
+      @err.puts "riptide: #{e.message}"
+      1
     end
 
     private
 
-    def run_command
-      perform_run(Store.new(path: Riptide.configuration.store_path))
-    end
+    def parse
+      options = { root: Dir.pwd, remote: "origin", prune: false }
+      OptionParser.new do |parser|
+        parser.banner = USAGE
+        parser.on("--suite NAME") { |value| options[:suite] = value }
+        parser.on("--remote NAME") { |value| options[:remote] = value }
+        parser.on("--log-dir DIR") { |value| options[:log_dir] = value }
+        parser.on("--root DIR") { |value| options[:root] = File.expand_path(value) }
+        parser.on("--prune") { options[:prune] = true }
+      end.parse!(@argv)
+      raise OptionParser::MissingArgument, "--suite" unless options[:suite]
 
-    def rebuild_command
-      store = Store.new(path: Riptide.configuration.store_path)
-      puts "Rebuilding dependency map from scratch..."
-      store.reset!
-      perform_run(store)
-    end
-
-    # Same decision-making as run, stops before Runner ever touches
-    # anything, nothing gets filtered or executed.
-    def plan_command
-      store = Store.new(path: Riptide.configuration.store_path)
-      load_test_files
-      discovered = Riptide.discovered_tests_by_file(root: @root)
-      decision, base = Riptide.decide(store: store, root: @root, discovered_tests_by_file: discovered)
-      report(decision, base, Riptide.known_tests(discovered).size)
-    end
-
-    # Loading test files first, before deciding anything, is what gives
-    # discovered_tests_by_file current ground truth: Minitest discovers
-    # every test class the moment its file is required, regardless of
-    # what later gets filtered down to run, verified directly against
-    # Minitest's -n filtering behavior.
-    def perform_run(store)
-      load_test_files
-      discovered = Riptide.discovered_tests_by_file(root: @root)
-      Riptide.prune_stale_tests!(store: store, discovered_tests_by_file: discovered)
-
-      decision, base = Riptide.decide(store: store, root: @root, discovered_tests_by_file: discovered)
-      report(decision, base, Riptide.known_tests(discovered).size)
-
-      Runner.new(decision: decision).apply
-    end
-
-    def report(decision, base, total)
-      if base
-        puts "Comparing HEAD against #{base}"
-      else
-        puts "No dependency map found."
-        puts "Running full suite and building one..."
-      end
-      puts "Selected: #{decision.summary(total: total)}"
-    end
-
-    # Test files, and test_helper itself, commonly require each other with a
-    # bare require "test_helper" rather than require_relative, matching how
-    # Rake::TestTask and bin/rails test both add the app root and test/ to
-    # $LOAD_PATH before requiring anything.
-    def load_test_files
-      test_dir = File.join(@root, File.dirname(Riptide.configuration.test_helper_path))
-      $LOAD_PATH.unshift(@root, test_dir)
-
-      require File.join(@root, Riptide.configuration.test_helper_path)
-
-      exclude = Riptide.configuration.test_exclude_patterns
-      files = Dir.glob(File.join(@root, Riptide.configuration.test_glob)).sort
-      files = files.reject { |f| exclude.any? { |pattern| f.match?(pattern) } } unless exclude.empty?
-      files.each { |f| require f }
+      options[:log_dir] = File.expand_path(options[:log_dir] || "tmp/riptide/#{options[:suite]}", options[:root])
+      options
     end
   end
 end

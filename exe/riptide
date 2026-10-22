@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
+# frozen_string_literal: true
 
-require "riptide"
+require "riptide/cli"
 
-result = Riptide::CLI.new(ARGV).call
-exit(result) if result
+exit Riptide::CLI.new(ARGV).call

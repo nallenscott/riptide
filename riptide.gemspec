@@ -7,7 +7,7 @@ Gem::Specification.new do |spec|
   spec.version  = Riptide::VERSION
   spec.authors  = ["Nathan Allen"]
   spec.email    = ["hello@nallenscott.com"]
-  spec.summary  = "Local-first test impact analysis for Rails and Minitest"
+  spec.summary  = "Test impact analysis for Rails and Minitest"
   spec.homepage = "https://github.com/nallenscott/riptide"
   spec.license  = "MIT"
 
@@ -17,7 +17,8 @@ Gem::Specification.new do |spec|
     "bug_tracker_uri" => "https://github.com/nallenscott/riptide/issues"
   }
 
-  spec.required_ruby_version = ">= 3.0"
+  # Ruby 3.3 ships Prism, which reads the structure of every changed file.
+  spec.required_ruby_version = ">= 3.3"
 
   spec.files = Dir["lib/**/*.rb", "ext/**/*.{rb,c,h}", "exe/*"] + ["riptide.gemspec"]
   spec.bindir = "exe"
@@ -32,5 +33,5 @@ Gem::Specification.new do |spec|
   # means an incompatible future major fails loudly at bundle install
   # instead of quietly at runtime.
   spec.add_dependency "minitest", ">= 5.1", "< 7"
-  spec.add_dependency "sqlite3", "~> 2.0"
+  spec.add_dependency "prism", ">= 1.0"
 end

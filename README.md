@@ -2,33 +2,45 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
 
-**Status: not production ready.** riptide is early and unproven outside of small test fixtures. The core selection algorithm has tests and has been validated end to end against toy apps, but hasn't run against a large Rails codebase yet. Expect rough edges, and treat any selection decision with suspicion until it's earned your trust.
+**Status: not production ready.** riptide is being validated against a large Rails app's CI. Treat any selection decision with suspicion until it's earned your trust.
 
-Local-first test impact analysis for Rails and Minitest: given a git diff, riptide figures out which tests are affected by what changed, and runs only those, instead of the whole suite.
+Test impact analysis for Rails and Minitest. riptide records what each test depends on while it runs, then runs only the tests a change can affect, on pull requests, the main branch and release branches alike.
 
-## The problem
+## How it works
 
-A large Rails app's test suite gets slower every year, and most of it has nothing to do with whatever line you just changed. CI ends up running thousands of tests to validate a one-line fix. riptide watches which lines of your app's code each test executes, at runtime, and uses that map to answer one question precisely: given this diff, which tests could possibly be affected?
+A recorded run is a fact about exact file versions: which parts of which git blobs a test depended on, and whether it passed. A test is skipped when a passing run it kept still holds, meaning nothing it depended on has changed in a way that reaches it. Selection compares against the working tree, never a base commit, so every branch works the same way. When a pull request merges, main's files are the PR's files, and the runs the PR recorded already match.
 
-## Mental model
+A test depends on:
 
-riptide doesn't guess. It watches. Every time a test runs, riptide records exactly which lines of source it touched. The next time you have a diff, it doesn't ask "which files changed", it asks "did the code this test touched move", using git's diff to tell the difference between an unrelated line shifting around and a change. A shift gets ignored. A change selects the test.
+- the methods and blocks it ran, during setup, the test itself and teardown
+- the constants it read, and for a constant whose value ran code at load, that code too
+- the classes it used: the ones it called methods on, and ActiveRecord models it created or loaded without running a line of their file
+- the code that ran while those classes loaded, like a concern's `included` block, and the constants that code read
+- the database tables its SQL touched
+- the files it read, the directories it listed, the files it checked for, and the locale files if it translated anything
+- the classes it looked up by name, and the names it looked up that weren't there
+- what every test in the process shares: the code that ran at boot, the files boot read, and the files in any directory the app's boot code listed, like `Dir["test/support/**/*.rb"]`
 
-Like a riptide, it runs beneath the surface, pulling narrowly and precisely rather than sweeping everything with it.
+When a file changes, riptide compares the recorded version with the one on disk and works out what changed. A change anywhere in a method or block selects the tests that ran it, including lines Ruby never reports running, like `else`, `rescue` or the second line of a call's arguments. A constant selects the tests that read it, including through `self.class::LIMIT` or `const_get(:LIMIT)`, which match any constant of that name in a file the test used. A declaration like `belongs_to` or `validates` selects the tests that used the class. A new method selects the tests that used its class when it could take over a call, from an ancestor, an attribute, `method_missing`, another file that reopens the class, or a class from outside the app like `String`. A schema change selects the tests that touched the table. Comments and moved lines select nothing.
+
+riptide only records files git tracks or would track, so an ignored file like a key never ends up in a recorded run.
+
+### What it can't see
+
+- Behavior that depends on the clock, the network, randomness or the environment.
+- Code run in a process a test spawns.
+- A new method a test only probed with `respond_to?` or `try`.
+- State a class body writes into another class, like registering itself with a registry, read through that other class.
+- `defined?(Foo)` and failed lexical constant reads. Lookups through `const_get` and `const_defined?` are covered.
+- Assets a browser loads during a system test. List them in `fallback_patterns` for suites that drive a browser.
 
 ## Requirements
 
-- Ruby >= 3.0
+- Ruby >= 3.3
 - Minitest >= 5.1, < 7
-- SQLite3
+- git
 
-Rails/Minitest only. No RSpec support.
-
-**Compatibility.** Minitest's plugin API (`register_plugin`, `init_plugins`) is verified identical on 5.27, 6.0.0, and 6.0.6, the versions this has been checked against; the gem dependency caps below 7 so an untested future major fails at `bundle install` rather than silently at runtime. riptide doesn't depend on the `rails` gem itself, nothing in its code calls a Rails API, but its default file-path conventions (see "How selection works" below) are verified against Rails' app generator templates on 6.1, 7.0, and 8.1 directly, not inferred. Every one of those defaults is overridable via `Riptide.configure` for a different layout or an older/newer Rails.
-
-## Installation
-
-Not published to RubyGems yet. Add it straight from GitHub:
+## Setup
 
 ```ruby
 group :test do
@@ -36,52 +48,55 @@ group :test do
 end
 ```
 
-## Setup
-
-Add one line to `test_helper.rb`:
+Configure riptide at the very top of `test_helper.rb`, before the app loads. It has to see class bodies run.
 
 ```ruby
-require "minitest/autorun"
+require "riptide"
+
+Riptide.configure do |c|
+  c.suite = "unit"
+  c.mode = :dry_run
+end
+
+require_relative "../config/environment"
+require "rails/test_help"
 require "minitest/riptide_plugin"
 ```
 
-That's the entire setup. It's a standard Minitest plugin (`Minitest.register_plugin`, `plugin_riptide_init`), not a custom API, so it activates the same way for any Minitest run, `bin/rails test`, `rake test`, or riptide's CLI.
+Minitest 5 loads every installed plugin file by itself, so riptide does nothing until `Riptide.configure` is called.
 
-## Usage
+## Configuration
+
+| Option | Default | Meaning |
+|---|---|---|
+| `suite` | `"default"` | Names the ref runs are kept under, `refs/riptide/<suite>`. A CI stage that runs a different slice of the tests is its own suite. |
+| `mode` | `:record` | `:record` records only. `:dry_run` also prints what it would run. `:enforce` runs only the selected tests. |
+| `fallback_patterns` | Gemfile, Gemfile.lock, config/application.rb, config/environment.rb, config/environments/test.rb, config/initializers/** | Files every test depends on as a whole. |
+| `source_patterns` | every file git knows about | Globs of the files dependencies are recorded on. |
+| `locale_patterns` | `config/locales/**/*` | Locale files a test that translated anything depends on. |
+| `schema_path` | `db/structure.sql` or `db/schema.rb` | The schema file, analyzed per table. |
+| `fixtures_path` | `test/fixtures` | Fixture files, analyzed per table. |
+| `retained_runs` | `4` | Runs kept per test. Any of them can make a test skippable, so moving between branches reuses earlier runs. |
+| `log_dir` | `tmp/riptide/<suite>` | Where test processes write runs until they're published. |
+| `plan_path` | none | Also writes the selection as JSON. |
+
+## Sharing runs
+
+Runs live in git, under `refs/riptide/<suite>` in the app's own repository. They never touch a branch, and a plain clone doesn't fetch them.
 
 ```bash
-bundle exec riptide run
+bundle exec riptide fetch --suite unit     # before the tests
+bundle exec rails test
+bundle exec riptide publish --suite unit   # after them
 ```
 
-First run bootstraps automatically: no map exists yet, so it runs the full suite and builds one. Every run after that computes a diff against `<default_remote>/<default_branch>` (both configurable, defaulting to `origin`/`main`) and runs only what that diff could affect.
+Test processes only read the ref and append to their own log, so a read-only `.git` is enough while tests run. `publish` folds the logs into a new commit and pushes it. Runs describe immutable file versions, so two builds publishing at once merge by union, and the one that lost the race retries. The ref only pins file versions from the commit the build checked out, so nothing staged, stashed or uncommitted gets pushed.
 
-```bash
-bundle exec riptide rebuild
-```
-
-Wipes the map and rebuilds it from scratch with a full run. Use this if a map ever seems wrong and you don't want to reason about why.
-
-## How selection works
-
-For each file in the diff, riptide looks up every test that has touched it and diffs that test's last-known version of the file against the current one. If none of the hunks overlap the lines that test covered, the test gets skipped, even if the file moved around underneath it. If a hunk does overlap, or if riptide has no historical data for an existing file, the test gets selected, favoring false positives over false negatives always.
-
-Some changes always trigger a full run regardless of the above, because they can affect app-wide behavior in ways line coverage can't be trusted to capture: `Gemfile`, `Gemfile.lock`, `test/test_helper.rb`, `config/application.rb`, `config/environment.rb`, and anything under `config/initializers/`. That list is `Riptide.configure`'s `fallback_patterns`, verified against Rails' generator conventions (see Compatibility above), not a guess, override it for a different layout.
-
-A changed file with no historical coverage also triggers a full run by default, the same reasoning: an empty history could mean untested code, or it could mean an incomplete map, and the safe assumption is the latter. But that check only makes sense for files a test could plausibly cover in the first place. Left at its default (unset), it applies to every changed file, including things like CI config or a Dockerfile that no test execution could touch, which will always look "uncovered" and force a full run every single time. Set `source_patterns` once you have data from your Store showing which directories your tests exercise, and the check narrows to just that scope. There's no built-in default for this one: unlike the fixed Rails paths above, "where does this app's tested code live" isn't a convention riptide can verify against, it varies per app, and guessing at it is exactly the kind of assumption this gem exists to avoid making about a codebase it doesn't know.
-
-## Known limitations
-
-- `bundle exec riptide plan` and `bundle exec riptide why` are not implemented yet.
-- No shared CI-caching story yet. The dependency map lives at `tmp/riptide/riptide.db` and needs to be persisted across CI runs (e.g. archived and restored as a build artifact) for riptide to have any benefit in CI; without that, every run bootstraps from scratch.
-- Not tested against a large-scale Rails application yet.
+Pass `--prune` on builds that discover the whole suite, like main, to drop runs of tests that no longer exist. A test that ran in the last two weeks stays, since it may only exist on a branch that hasn't merged yet.
 
 ## Development
 
-After checking out the repo, run `bin/setup` to install dependencies, then `rake test` to run the suite.
-
-## Contributing
-
-Bug reports and pull requests are welcome on GitHub at https://github.com/nallenscott/riptide.
+Run `bin/setup` to install dependencies, then `rake test`.
 
 ## License
 

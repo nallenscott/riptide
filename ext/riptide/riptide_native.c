@@ -1,274 +1,406 @@
-// frozen_string_literal: true
-//
-// Native implementation of Riptide::Collector: records which lines of project
-// source execute while a block runs. Registers a raw C event hook
-// (rb_add_event_hook2 + RUBY_EVENT_HOOK_FLAG_RAW_ARG) rather than a TracePoint, so
-// path/line come straight off the rb_trace_arg_t the VM already built to fire the
-// event (via rb_tracearg_path/rb_tracearg_lineno), with no Ruby Proc invocation and
-// no TracePoint object construction in the hot path -- see riptide's implementation
-// plan for the full mechanism trace against Ruby's own vm_trace.c.
-//
-// Every VALUE this file holds onto across event-hook invocations (root_with_slash,
-// scope_cache, touched, last_path, last_relative_or_false, last_array) is an ordinary
-// Ruby object (String, Hash, Array), not a raw untracked pointer, specifically so GC
-// marking and compaction stay inside Ruby's own object implementations rather than a
-// hand-rolled C table. See dmark/dcompact below: each is a one-line delegation.
+// Riptide::Tracer: one hook for the life of the process. Every in-scope line,
+// method entry and block entry goes to the open test window, or to load facts
+// while its thread is inside a class body, or else to boot lines.
 
 #include <ruby.h>
 #include <ruby/debug.h>
 #include <ruby/encoding.h>
 
 static VALUE mRiptide;
-static VALUE cCollector;
+static VALUE mTracer;
 
-// Content-keyed Hash: "<root>/" => a per-root, compare_by_identity Hash mapping a
-// file's path VALUE (stable and reused per iseq -- confirmed against rb_iseq_path,
-// the same object Coverage itself keys its own results hash by) to either that file's
-// precomputed relative-path VALUE (in scope) or Qfalse (out of scope). Lives for the
-// whole process: a file's scope membership can't change mid-run, so only the first
-// test in the entire suite to touch a given file ever pays the classification cost.
-// Keyed by root (not a single flat cache) because direct usage -- this gem's own
-// tests included -- creates collectors against different roots in the same process.
-static VALUE root_scope_caches;
+static VALUE roots = Qnil;         // the root with a trailing slash, and its realpath if that differs
+static VALUE scope_cache = Qnil;   // path VALUE => relative path String, or false
+#define SCOPE_CACHE_LIMIT 100000     // eval makes a new path string every time
+static VALUE stacks = Qnil;        // thread => [class, frame depth, ...] being defined
+static long loading = 0;           // classes being defined, summed over threads
 
-typedef struct {
-    VALUE root_with_slash;
-    VALUE scope_cache;
-    VALUE touched;
-    VALUE last_path;
-    VALUE last_relative_or_false;
-    VALUE last_array;
-    int active;
-} riptide_native_collector_t;
+static VALUE window = Qnil;        // relative path => byte map String, or nil
+static VALUE receivers = Qnil;     // class => true for each receiver of an in-scope method in the window
+static VALUE last_receiver = Qnil;
+static VALUE load_facts = Qnil;    // relative path => { line => Array of classes }
+static VALUE load_called = Qnil;   // relative path => { line => true } for called code
+static VALUE owner_files = Qnil;   // class => { relative path => true }
+static VALUE boot_lines = Qnil;    // relative path => { line => true }
 
-static void
-riptide_native_collector_mark(void *ptr)
-{
-    riptide_native_collector_t *data = (riptide_native_collector_t *)ptr;
-    rb_gc_mark_movable(data->root_with_slash);
-    rb_gc_mark_movable(data->scope_cache);
-    rb_gc_mark_movable(data->touched);
-    rb_gc_mark_movable(data->last_path);
-    rb_gc_mark_movable(data->last_relative_or_false);
-    rb_gc_mark_movable(data->last_array);
-}
+static VALUE last_path = Qnil;
+static VALUE last_relative = Qfalse;
+static VALUE last_map = Qnil;
 
-static void
-riptide_native_collector_compact(void *ptr)
-{
-    riptide_native_collector_t *data = (riptide_native_collector_t *)ptr;
-    data->root_with_slash = rb_gc_location(data->root_with_slash);
-    data->scope_cache = rb_gc_location(data->scope_cache);
-    data->touched = rb_gc_location(data->touched);
-    data->last_path = rb_gc_location(data->last_path);
-    data->last_relative_or_false = rb_gc_location(data->last_relative_or_false);
-    data->last_array = rb_gc_location(data->last_array);
-}
-
-static void
-riptide_native_collector_free(void *ptr)
-{
-    // Deliberately does not attempt to remove a still-active hook here: dfree
-    // receives only the raw data pointer, not the wrapping VALUE, and this VALUE is
-    // exactly what rb_add_event_hook2 was given as its `data` argument, needed to
-    // find the right hook entry to remove. #start/#stop guard against double-start
-    // and are always paired in every real call site (MinitestHooks#stop runs from
-    // before_teardown, which Minitest always calls, and #capture always pairs them
-    // itself), so a collector reaching dfree while still active means a caller
-    // skipped #stop -- a usage bug, not a state this file tries to recover from.
-    xfree(ptr);
-}
-
-static const rb_data_type_t riptide_native_collector_data_type = {
-    "Riptide::Collector",
-    {
-        riptide_native_collector_mark,
-        riptide_native_collector_free,
-        NULL,
-        riptide_native_collector_compact,
-    },
-    0,
-    0,
-    RUBY_TYPED_FREE_IMMEDIATELY,
-};
+static int installed = 0;
 
 static VALUE
-riptide_native_collector_alloc(VALUE klass)
+identity_hash(void)
 {
-    riptide_native_collector_t *data;
-    VALUE obj = TypedData_Make_Struct(klass, riptide_native_collector_t, &riptide_native_collector_data_type, data);
-
-    data->root_with_slash = Qnil;
-    data->scope_cache = Qnil;
-    data->touched = Qnil;
-    data->last_path = Qnil;
-    data->last_relative_or_false = Qfalse;
-    data->last_array = Qnil;
-    data->active = 0;
-
-    return obj;
+    VALUE hash = rb_hash_new();
+    rb_funcall(hash, rb_intern("compare_by_identity"), 0);
+    return hash;
 }
 
-static riptide_native_collector_t *
-get_data(VALUE self)
-{
-    riptide_native_collector_t *data;
-    TypedData_Get_Struct(self, riptide_native_collector_t, &riptide_native_collector_data_type, data);
-    return data;
-}
-
-// root is already File.expand_path'd by the Ruby-level wrapper (lib/riptide/collector.rb).
 static VALUE
-riptide_native_collector_initialize(VALUE self, VALUE root)
+relative_path(VALUE path)
 {
-    riptide_native_collector_t *data = get_data(self);
+    if (path == last_path) return last_relative;
 
-    Check_Type(root, T_STRING);
-
-    VALUE root_with_slash = rb_str_plus(root, rb_str_new_cstr("/"));
-    rb_str_freeze(root_with_slash);
-    data->root_with_slash = root_with_slash;
-
-    VALUE scope_cache = rb_hash_aref(root_scope_caches, root_with_slash);
-    if (NIL_P(scope_cache)) {
-        scope_cache = rb_hash_new();
-        rb_funcall(scope_cache, rb_intern("compare_by_identity"), 0);
-        rb_hash_aset(root_scope_caches, root_with_slash, scope_cache);
-    }
-    data->scope_cache = scope_cache;
-
-    return self;
-}
-
-// Classifies `path` (an absolute file path VALUE from rb_tracearg_path) against this
-// instance's root, populating the shared scope cache on a miss. Returns the file's
-// relative-path VALUE if in scope, Qfalse otherwise. Only runs on a scope-cache miss,
-// i.e. at most once per file per root for the life of the process -- not the hot path.
-static VALUE
-classify(riptide_native_collector_t *data, VALUE path)
-{
-    VALUE cached = rb_hash_aref(data->scope_cache, path);
-    if (!NIL_P(cached)) return cached;
-
-    long root_len = RSTRING_LEN(data->root_with_slash);
-    long path_len = RSTRING_LEN(path);
-    VALUE result;
-
-    if (path_len > root_len &&
-        memcmp(RSTRING_PTR(path), RSTRING_PTR(data->root_with_slash), root_len) == 0) {
-        // rb_str_new leaves the result ASCII-8BIT regardless of the source
-        // string's own encoding. The sqlite3 gem binds an ASCII-8BIT Ruby
-        // string as a BLOB parameter, not TEXT -- confirmed directly: two
-        // rows with byte-identical source_file content, one inserted via a
-        // normal (UTF-8) Ruby string and one via this code unfixed, come
-        // back from SQLite as text and blob respectively, and SQLite never
-        // considers a TEXT value equal to a BLOB of the same bytes, so the
-        // UNIQUE(test_id, source_file) constraint silently failed to match,
-        // and every WHERE source_file = ? lookup elsewhere in riptide
-        // (using ordinary Ruby strings) permanently missed rows this wrote.
-        // rb_enc_str_new keeps the encoding path itself already has,
-        // matching what the pure-Ruby String#delete_prefix this replaced
-        // did automatically.
-        result = rb_enc_str_new(RSTRING_PTR(path) + root_len, path_len - root_len, rb_enc_get(path));
-        rb_str_freeze(result);
-    } else {
-        result = Qfalse;
-    }
-
-    rb_hash_aset(data->scope_cache, path, result);
-    return result;
-}
-
-static void
-riptide_line_hook(VALUE self, rb_trace_arg_t *trace_arg)
-{
-    riptide_native_collector_t *data = get_data(self);
-
-    VALUE path = rb_tracearg_path(trace_arg);
-    if (NIL_P(path)) return;
-
-    if (path != data->last_path) {
-        data->last_path = path;
-        data->last_relative_or_false = classify(data, path);
-
-        if (data->last_relative_or_false != Qfalse) {
-            VALUE arr = rb_hash_aref(data->touched, data->last_relative_or_false);
-            if (NIL_P(arr)) {
-                arr = rb_ary_new();
-                rb_hash_aset(data->touched, data->last_relative_or_false, arr);
+    VALUE cached = rb_hash_lookup2(scope_cache, path, Qundef);
+    if (cached == Qundef) {
+        if (RHASH_SIZE(scope_cache) >= SCOPE_CACHE_LIMIT) rb_hash_clear(scope_cache);
+        cached = Qfalse;
+        long path_len = RSTRING_LEN(path);
+        for (long i = 0; i < RARRAY_LEN(roots); i++) {
+            VALUE root = rb_ary_entry(roots, i);
+            long root_len = RSTRING_LEN(root);
+            if (path_len > root_len && memcmp(RSTRING_PTR(path), RSTRING_PTR(root), root_len) == 0) {
+                cached = rb_enc_str_new(RSTRING_PTR(path) + root_len, path_len - root_len, rb_enc_get(path));
+                rb_str_freeze(cached);
+                break;
             }
-            data->last_array = arr;
-        } else {
-            data->last_array = Qnil;
+        }
+        rb_hash_aset(scope_cache, path, cached);
+    }
+
+    last_path = path;
+    last_relative = cached;
+    last_map = Qnil;
+    return cached;
+}
+
+static VALUE
+current_stack(int create)
+{
+    VALUE thread = rb_thread_current();
+    VALUE stack = rb_hash_lookup2(stacks, thread, Qnil);
+    if (NIL_P(stack) && create) {
+        stack = rb_ary_new();
+        rb_hash_aset(stacks, thread, stack);
+    }
+    return stack;
+}
+
+static void
+nested_set(VALUE outer, VALUE key, VALUE inner_key)
+{
+    VALUE inner = rb_hash_lookup2(outer, key, Qnil);
+    if (NIL_P(inner)) {
+        inner = rb_hash_new();
+        rb_hash_aset(outer, key, inner);
+    }
+    rb_hash_aset(inner, inner_key, Qtrue);
+}
+
+// Frames on the current thread's stack. Only counted on class entry and on
+// a rescue while a class is loading, both rare.
+#define MAX_DEPTH 65536
+static VALUE frame_buffer[MAX_DEPTH];
+static int line_buffer[MAX_DEPTH];
+
+static long
+frame_depth(void)
+{
+    return rb_profile_frames(0, MAX_DEPTH, frame_buffer, line_buffer);
+}
+
+static VALUE
+current_owner(VALUE stack)
+{
+    return rb_ary_entry(stack, -2);
+}
+
+static void
+pop_owner(VALUE stack)
+{
+    rb_ary_pop(stack);
+    rb_ary_pop(stack);
+    loading--;
+    if (RARRAY_LEN(stack) == 0) rb_hash_delete(stacks, rb_thread_current());
+}
+
+// `class << obj` on a plain object opens a class nothing else will ever
+// name, so it's tracked for loading but never kept as an owner.
+static void
+on_class(VALUE klass, VALUE path)
+{
+    VALUE stack = current_stack(1);
+    rb_ary_push(stack, klass);
+    rb_ary_push(stack, LONG2FIX(frame_depth()));
+    loading++;
+
+    if (RB_TYPE_P(klass, T_CLASS) && FL_TEST(klass, FL_SINGLETON)) {
+        VALUE attached = rb_class_attached_object(klass);
+        if (!RB_TYPE_P(attached, T_CLASS) && !RB_TYPE_P(attached, T_MODULE)) return;
+    }
+
+    VALUE relative = NIL_P(path) ? Qfalse : relative_path(path);
+    if (relative != Qfalse) nested_set(owner_files, klass, relative);
+}
+
+static void
+on_end(void)
+{
+    VALUE stack = current_stack(0);
+    if (NIL_P(stack) || RARRAY_LEN(stack) == 0) return;
+
+    pop_owner(stack);
+}
+
+// A class body that raises never reaches its end event. Once something
+// shallower rescues the error, the bodies it unwound are done loading.
+static void
+on_rescue(void)
+{
+    VALUE stack = current_stack(0);
+    if (NIL_P(stack) || RARRAY_LEN(stack) == 0) return;
+
+    long depth = frame_depth();
+    while (RARRAY_LEN(stack) > 0 && FIX2LONG(rb_ary_entry(stack, -1)) > depth) pop_owner(stack);
+}
+
+// Whether the running frame is a method or block, not a class or module body.
+static int
+in_called_code(void)
+{
+    VALUE frame;
+    int line;
+    if (rb_profile_frames(0, 1, &frame, &line) < 1) return 0;
+
+    VALUE label = rb_profile_frame_label(frame);
+    if (NIL_P(label)) return 0;
+
+    const char *text = RSTRING_PTR(label);
+    long len = RSTRING_LEN(label);
+    if (len >= 7 && strncmp(text, "<class:", 7) == 0) return 0;
+    if (len >= 8 && strncmp(text, "<module:", 8) == 0) return 0;
+    if (len >= 15 && strncmp(text, "singleton class", 15) == 0) return 0;
+    return 1;
+}
+
+static void
+record_load(VALUE relative, VALUE owner, VALUE lineno)
+{
+    if (in_called_code()) nested_set(load_called, relative, lineno);
+
+    VALUE lines = rb_hash_lookup2(load_facts, relative, Qnil);
+    if (NIL_P(lines)) {
+        lines = rb_hash_new();
+        rb_hash_aset(load_facts, relative, lines);
+    }
+    VALUE owners = rb_hash_lookup2(lines, lineno, Qnil);
+    if (NIL_P(owners)) {
+        owners = rb_ary_new();
+        rb_hash_aset(lines, lineno, owners);
+    }
+    if (!RTEST(rb_ary_includes(owners, owner))) rb_ary_push(owners, owner);
+    nested_set(owner_files, owner, relative);
+}
+
+static void
+record_window(VALUE relative, long line)
+{
+    if (NIL_P(last_map)) {
+        last_map = rb_hash_lookup2(window, relative, Qnil);
+        if (NIL_P(last_map)) {
+            last_map = rb_str_new(NULL, 256);
+            memset(RSTRING_PTR(last_map), 0, 256);
+            rb_hash_aset(window, relative, last_map);
         }
     }
 
-    if (data->last_relative_or_false == Qfalse) return;
+    long len = RSTRING_LEN(last_map);
+    if (line >= len) {
+        long grown = line * 2 + 1;
+        rb_str_resize(last_map, grown);
+        memset(RSTRING_PTR(last_map) + len, 0, grown - len);
+    }
+    RSTRING_PTR(last_map)[line] = 1;
+}
 
-    VALUE lineno = rb_tracearg_lineno(trace_arg);
-    rb_ary_push(data->last_array, lineno);
+static void
+hook(VALUE data, rb_trace_arg_t *arg)
+{
+    (void)data;
+    rb_event_flag_t event = rb_tracearg_event_flag(arg);
+
+    if (event == RUBY_EVENT_CLASS) {
+        on_class(rb_tracearg_self(arg), rb_tracearg_path(arg));
+        return;
+    }
+    if (event == RUBY_EVENT_END) {
+        on_end();
+        return;
+    }
+    if (event == RUBY_EVENT_RESCUE) {
+        if (loading > 0) on_rescue();
+        return;
+    }
+
+    VALUE path = rb_tracearg_path(arg);
+    if (NIL_P(path)) return;
+
+    VALUE relative = relative_path(path);
+    if (relative == Qfalse) return;
+
+    VALUE lineno = rb_tracearg_lineno(arg);
+
+    if (loading > 0) {
+        VALUE stack = current_stack(0);
+        if (!NIL_P(stack) && RARRAY_LEN(stack) > 0) {
+            record_load(relative, current_owner(stack), lineno);
+            return;
+        }
+    }
+
+    if (!NIL_P(window)) {
+        record_window(relative, FIX2LONG(lineno));
+        if (event == RUBY_EVENT_CALL) {
+            // A method that comes in later anywhere in the receiver's
+            // ancestry can take this call over, so the receiver's class
+            // counts, not just where the method lives.
+            // A class method's receiver is the class itself, whose
+            // singleton ancestry riptide expands later.
+            VALUE self = rb_tracearg_self(arg);
+            VALUE klass = RB_TYPE_P(self, T_CLASS) || RB_TYPE_P(self, T_MODULE) ? self : rb_obj_class(self);
+            if (klass != last_receiver) {
+                last_receiver = klass;
+                rb_hash_aset(receivers, klass, Qtrue);
+            }
+        }
+    } else {
+        nested_set(boot_lines, relative, lineno);
+    }
 }
 
 static VALUE
-riptide_native_collector_start(VALUE self)
+tracer_install(VALUE self, VALUE prefixes)
 {
-    riptide_native_collector_t *data = get_data(self);
+    (void)self;
+    Check_Type(prefixes, T_ARRAY);
+    if (installed) rb_raise(rb_eRuntimeError, "Riptide::Tracer is already installed");
 
-    if (data->active) {
-        rb_raise(rb_eRuntimeError, "Riptide::Collector#start called while already active; call #stop first");
-    }
+    roots = rb_ary_freeze(rb_ary_dup(prefixes));
+    installed = 1;
+    rb_add_event_hook2((rb_event_hook_func_t)hook, RUBY_EVENT_LINE | RUBY_EVENT_CALL | RUBY_EVENT_B_CALL | RUBY_EVENT_CLASS | RUBY_EVENT_END | RUBY_EVENT_RESCUE, Qnil,
+                       RUBY_EVENT_HOOK_FLAG_SAFE | RUBY_EVENT_HOOK_FLAG_RAW_ARG);
+    return Qnil;
+}
 
-    VALUE touched = rb_hash_new();
-    rb_funcall(touched, rb_intern("compare_by_identity"), 0);
-    data->touched = touched;
-    data->last_path = Qnil;
-    data->last_relative_or_false = Qfalse;
-    data->last_array = Qnil;
-    data->active = 1;
+static VALUE
+tracer_installed_p(VALUE self)
+{
+    (void)self;
+    return installed ? Qtrue : Qfalse;
+}
 
-    rb_add_event_hook2((rb_event_hook_func_t)riptide_line_hook, RUBY_EVENT_LINE, self,
-                        RUBY_EVENT_HOOK_FLAG_SAFE | RUBY_EVENT_HOOK_FLAG_RAW_ARG);
+static VALUE
+tracer_open_window(VALUE self)
+{
+    (void)self;
+    if (!NIL_P(window)) rb_raise(rb_eRuntimeError, "a Riptide::Tracer window is already open");
 
+    window = rb_hash_new();
+    receivers = identity_hash();
+    last_map = Qnil;
+    last_receiver = Qnil;
     return Qnil;
 }
 
 static int
-copy_touched_entry(VALUE relative_path, VALUE lines, VALUE result)
+collect_lines(VALUE relative, VALUE map, VALUE result)
 {
-    VALUE set_class = rb_const_get(rb_cObject, rb_intern("Set"));
-    VALUE set = rb_funcall(set_class, rb_intern("new"), 1, lines);
-    rb_hash_aset(result, relative_path, set);
+    const char *bytes = RSTRING_PTR(map);
+    long len = RSTRING_LEN(map);
+    VALUE lines = rb_ary_new();
+    for (long i = 0; i < len; i++) {
+        if (bytes[i]) rb_ary_push(lines, LONG2FIX(i));
+    }
+    rb_hash_aset(result, relative, lines);
     return ST_CONTINUE;
 }
 
 static VALUE
-riptide_native_collector_stop(VALUE self)
+tracer_close_window(VALUE self)
 {
-    riptide_native_collector_t *data = get_data(self);
+    (void)self;
+    if (NIL_P(window)) rb_raise(rb_eRuntimeError, "no Riptide::Tracer window is open");
 
-    if (!data->active) {
-        rb_raise(rb_eRuntimeError, "Riptide::Collector#stop called without an active #start");
-    }
-
-    rb_remove_event_hook_with_data((rb_event_hook_func_t)riptide_line_hook, self);
-    data->active = 0;
-
-    VALUE result = rb_hash_new();
-    rb_hash_foreach(data->touched, copy_touched_entry, result);
+    VALUE lines = rb_hash_new();
+    rb_hash_foreach(window, collect_lines, lines);
+    VALUE result = rb_assoc_new(lines, rb_funcall(receivers, rb_intern("keys"), 0));
+    window = Qnil;
+    receivers = Qnil;
+    last_map = Qnil;
+    last_receiver = Qnil;
     return result;
+}
+
+static VALUE
+drain(VALUE *slot)
+{
+    VALUE drained = *slot;
+    *slot = rb_hash_new();
+    return drained;
+}
+
+static VALUE
+tracer_drain_load_facts(VALUE self)
+{
+    (void)self;
+    return drain(&load_facts);
+}
+
+static VALUE
+tracer_drain_load_called(VALUE self)
+{
+    (void)self;
+    return drain(&load_called);
+}
+
+static VALUE
+tracer_drain_boot_lines(VALUE self)
+{
+    (void)self;
+    return drain(&boot_lines);
+}
+
+static VALUE
+tracer_owner_files(VALUE self)
+{
+    (void)self;
+    return owner_files;
 }
 
 void
 Init_riptide_native(void)
 {
     mRiptide = rb_define_module("Riptide");
-    cCollector = rb_define_class_under(mRiptide, "Collector", rb_cObject);
-    rb_define_alloc_func(cCollector, riptide_native_collector_alloc);
+    mTracer = rb_define_module_under(mRiptide, "Tracer");
 
-    rb_define_private_method(cCollector, "_native_initialize", riptide_native_collector_initialize, 1);
-    rb_define_method(cCollector, "start", riptide_native_collector_start, 0);
-    rb_define_method(cCollector, "stop", riptide_native_collector_stop, 0);
+    scope_cache = identity_hash();
+    stacks = identity_hash();
+    load_facts = rb_hash_new();
+    load_called = rb_hash_new();
+    owner_files = identity_hash();
+    boot_lines = rb_hash_new();
 
-    root_scope_caches = rb_hash_new();
-    rb_gc_register_address(&root_scope_caches);
+    rb_gc_register_address(&roots);
+    rb_gc_register_address(&scope_cache);
+    rb_gc_register_address(&stacks);
+    rb_gc_register_address(&window);
+    rb_gc_register_address(&receivers);
+    rb_gc_register_address(&last_receiver);
+    rb_gc_register_address(&load_facts);
+    rb_gc_register_address(&load_called);
+    rb_gc_register_address(&owner_files);
+    rb_gc_register_address(&boot_lines);
+    rb_gc_register_address(&last_path);
+    rb_gc_register_address(&last_relative);
+    rb_gc_register_address(&last_map);
+
+    rb_define_singleton_method(mTracer, "_install", tracer_install, 1);
+    rb_define_singleton_method(mTracer, "installed?", tracer_installed_p, 0);
+    rb_define_singleton_method(mTracer, "open_window", tracer_open_window, 0);
+    rb_define_singleton_method(mTracer, "_close_window", tracer_close_window, 0);
+    rb_define_singleton_method(mTracer, "_drain_load_facts", tracer_drain_load_facts, 0);
+    rb_define_singleton_method(mTracer, "_drain_load_called", tracer_drain_load_called, 0);
+    rb_define_singleton_method(mTracer, "drain_boot_lines", tracer_drain_boot_lines, 0);
+    rb_define_singleton_method(mTracer, "_owner_files", tracer_owner_files, 0);
 }

@@ -3,176 +3,131 @@
 require "set"
 
 module Riptide
+  # Decides which tests the working tree can affect, from recorded runs
+  # alone. Every recorded input names the exact file version it was
+  # recorded against, so there's no diff base: the question for each test
+  # is whether anything it depended on differs from what's on disk now.
   class Selector
-    Decision = Struct.new(:mode, :reason, :selected, keyword_init: true) do
-      # A human-readable description of this decision, shared by the CLI
-      # commands and the Minitest plugin's dry_run logging, the two
-      # places that report what got decided. Includes every selected
-      # test and why, not just a count: a count alone can't be checked
-      # against anything, the whole point of dry_run is to be able to
-      # compare a decision against what happened later.
-      # +total+, when given, adds "N/total" instead of a bare count.
-      def summary(total: nil)
-        return "full suite (#{reason})" if mode == :full
-
-        header = total ? "#{selected.size}/#{total} tests" : "#{selected.size} tests"
-        return header if selected.empty?
-
-        lines = selected.map { |test| "  #{test[:class_name]}##{test[:method_name]}: #{test[:reasons].join(", ")}" }
+    Decision = Struct.new(:mode, :selected, :total, keyword_init: true) do
+      def summary(limit: 30)
+        header = "#{selected.size}/#{total} tests"
+        header = "full suite, #{header}" if mode == :full
+        lines = selected.first(limit).map { |entry| "  #{entry[:test].join("#")}: #{entry[:reason]}" }
+        lines << "  ... #{selected.size - limit} more" if selected.size > limit
         ([header] + lines).join("\n")
       end
 
-      # Whether this decision would actually execute the given test. Used
-      # by the Minitest plugin's dry_run path to gate which tests' coverage
-      # gets recorded: dry_run runs every test regardless of what got
-      # selected, so without this, a test riptide wouldn't have selected
-      # would still have its coverage refreshed, permanently erasing the
-      # "this file still differs from base" signal the next build would
-      # otherwise correctly see. Memoized: called once per test in the
-      # whole suite, not something to linear-scan +selected+ for each time.
-      def runs?(class_name, method_name)
-        mode == :full || selected_set.include?([class_name, method_name])
+      def to_h
+        { "mode" => mode.to_s, "total" => total,
+          "selected" => selected.map { |entry| { "test" => entry[:test], "reason" => entry[:reason] } } }
       end
 
-      private
-
-      def selected_set
-        @selected_set ||= selected.map { |test| [test[:class_name], test[:method_name]] }.to_set
+      def self.full(tests, reason)
+        new(mode: :full, total: tests.size, selected: tests.map { |test| { test: test, reason: reason } })
       end
     end
 
-    # +discovered_tests_by_file+ is { relative_path => [[class_name, method_name], ...] },
-    # every test method Minitest currently knows about, grouped by the file
-    # it's defined in (via Method#source_location, not a naming
-    # convention). Without it, a test method Store hasn't recorded
-    # (a brand new test file, or a new method added to an existing one)
-    # doesn't get selected at all: it has no dependency rows to diff
-    # against, and isn't "modified" content Store tracks, so it silently
-    # doesn't run.
-    def initialize(store:, root: Dir.pwd, discovered_tests_by_file: {})
+    FACETS = %w[methods blocks owners tables].freeze
+
+    # +listing+ returns what a recorded glob matches now.
+    def initialize(store:, analyzer:, root:, tests:, listing:)
       @store = store
+      @analyzer = analyzer
       @root = root
-      @discovered_tests_by_file = discovered_tests_by_file
+      @tests = tests
+      @listing = listing
+      @current = {}
+      @suite_reason = nil
     end
 
-    # Decides what to run for the changes between +base+ and +head+.
-    # Returns a Decision: mode is :full (run everything, with +reason+ set)
-    # or :selected (run exactly +selected+, an array of
-    # { class_name:, method_name:, reasons: [...] }).
-    def select(base:, head: "HEAD")
-      changed = Diff.changed_files(base, head)
-
-      fallback_reason = find_fallback_reason(changed)
-      return Decision.new(mode: :full, reason: fallback_reason, selected: []) if fallback_reason
-
-      selected = {}
-      changed.each do |file|
-        accumulate_selection(file, selected)
-        add_undiscovered_tests(file, selected)
+    def select
+      runs = @store.runs(@tests)
+      selected = @tests.filter_map do |test|
+        reason = reason_to_run(runs.fetch(test, []))
+        { test: test, reason: reason } if reason
       end
+      return Decision.full(@tests, @suite_reason) if @suite_reason && !@tests.empty?
 
-      Decision.new(mode: :selected, reason: nil, selected: selected.values)
+      full = !@tests.empty? && selected.size == @tests.size
+      Decision.new(mode: full ? :full : :selected, selected: selected, total: @tests.size)
     end
 
     private
 
-    # Any test currently defined in +file+ that Store hasn't recorded
-    # coverage for gets selected outright, regardless of the file's diff
-    # status. A test known to Store is left to accumulate_selection's
-    # precise line-diffing instead of being re-selected unconditionally here.
-    # Looks Store up by lookup_path_for, not file[:path]: for a renamed
-    # file, Store's rows are still keyed by the old path, checking the new
-    # one would always come back empty and treat every test in the file as
-    # newly discovered.
-    def add_undiscovered_tests(file, selected)
-      tests_in_file = @discovered_tests_by_file[file[:path]] || []
-      return if tests_in_file.empty?
+    # A test is skipped when any passing run it kept still holds: nothing it
+    # depended on changed in a way that reaches it. A run from another branch
+    # can hold when the newest one doesn't.
+    def reason_to_run(runs)
+      return "no recorded run" if runs.empty?
+      return "failed the last time it ran" unless runs.first.passed
 
-      known = @store.dependencies_for_file(lookup_path_for(file)).map { |d| [d[:class_name], d[:method_name]] }.to_set
-
-      tests_in_file.each do |class_name, method_name|
-        next if known.include?([class_name, method_name])
-
-        remember(selected, { class_name: class_name, method_name: method_name },
-                 "#{file[:path]} has no recorded coverage for this test yet")
-      end
+      reasons = runs.select(&:passed).map { |run| unchanged?(run) ? nil : first_reason(run) }
+      reasons.all? ? reasons.first : nil
     end
 
-    # A file that matches a fallback pattern always forces a full run. An
-    # existing file that was touched, modified, deleted, or renamed, but
-    # that Store has zero historical coverage for, also forces a full
-    # run: we can't tell whether that's untested code or an incomplete
-    # map, and the safe assumption is the latter. A brand-new file is
-    # exempt from that second check, having no history yet is expected,
-    # not suspicious. So is a file outside source_patterns (when the app
-    # has set it): no test execution could produce history for it, so an
-    # empty history there isn't a signal of anything.
-    def find_fallback_reason(changed)
-      changed.each do |file|
-        return "#{file[:path]} matches a fallback pattern" if fallback_pattern?(file[:path])
-        next if file[:status] == :added
-        next unless in_source_scope?(file[:path])
+    # Everything a run depended on: its shared sets, then its own inputs.
+    # nil when a shared set is missing, since then nothing can be checked.
+    def files_of(run)
+      sets = run.sets.map { |id| @store.set(id) }
+      sets.include?(nil) ? nil : sets << run.inputs
+    end
 
-        lookup_path = lookup_path_for(file)
-        return "#{file[:path]} has no historical coverage" if @store.dependencies_for_file(lookup_path).empty?
+    def unchanged?(run)
+      files_of(run)&.all? { |files| files.all? { |path, facets| current_sha(path) == facets["sha"] } }
+    end
+
+    def first_reason(run)
+      groups = files_of(run)
+      return "a shared set it depended on isn't available" unless groups
+
+      read = groups.flat_map { |files| files.values.flat_map { |facets| facets["constants"] || [] } }.to_set
+      groups.each do |files|
+        files.each do |path, facets|
+          reason = reason_for(path, facets, read)
+          return reason if reason
+        end
       end
       nil
     end
 
-    def accumulate_selection(file, selected)
-      case file[:status]
-      when :added
-        nil
-      when :deleted
-        add_all(file[:path], selected, reason: "#{file[:path]} was deleted")
-      when :modified, :renamed
-        add_for_content_change(file, selected)
+    # +read+ holds every constant the run read, in any file. A constant
+    # added here can shadow one read elsewhere, and a dynamic read like
+    # "*::LIMIT" matches a changed constant of that name.
+    def reason_for(path, facets, read)
+      current = current_sha(path)
+      return nil if current == facets["sha"]
+      return "#{Env.constant_name(path)} is defined now" if Env.constant?(path)
+      return "files matching #{path.delete_prefix(Env::GLOB)} were added or removed" if Env.pseudo?(path)
+      return "#{path} was deleted" if current.nil?
+
+      change = @analyzer.change(path, facets["sha"])
+      return "#{path} changed, and the recorded version isn't in this repository" if change.nil?
+      return nil if change.empty?
+      return suite("#{path} changed top-level code") if change.suite?
+      return "#{path} changed as a whole" if change.whole? || facets["whole"]
+
+      FACETS.each do |facet|
+        hit = facets[facet]&.find { |name| change.public_send(facet).include?(name) }
+        return "#{path} changed #{hit}" if hit
       end
+      hit = change.constants.find { |name| read.include?(name) }
+      return "#{path} changed #{hit}" if hit
+
+      hit = change.constants.find { |name| read.include?("*::#{name.split("::").last}") }
+      hit && "#{path} changed #{hit}, which the test may have looked up by name"
     end
 
-    def add_all(lookup_path, selected, reason:)
-      @store.dependencies_for_file(lookup_path).each { |dep| remember(selected, dep, reason) }
+    def suite(reason)
+      @suite_reason ||= reason
     end
 
-    def add_for_content_change(file, selected)
-      lookup_path = lookup_path_for(file)
-      deps = @store.dependencies_for_file(lookup_path)
-      current_sha = Diff.blob_sha(File.join(@root, file[:path]))
+    def current_sha(path)
+      return @current[path] if @current.key?(path)
+      return @current[path] = Env.presence(path) if Env.constant?(path)
+      return @current[path] = @listing.call(path.delete_prefix(Env::GLOB)) if Env.pseudo?(path)
 
-      deps.each do |dep|
-        next if dep[:source_blob_sha] == current_sha
-
-        hunks = Diff.hunks(Diff.unified(dep[:source_blob_sha], current_sha))
-        overlap = dep[:ranges].any? { |range| Diff.translate_range(hunks, *range).nil? }
-        next unless overlap
-
-        remember(selected, dep, "#{file[:path]} changed within a covered range")
-      end
-    end
-
-    def remember(selected, dep, reason)
-      key = [dep[:class_name], dep[:method_name]]
-      selected[key] ||= { class_name: dep[:class_name], method_name: dep[:method_name], reasons: [] }
-      selected[key][:reasons] << reason
-    end
-
-    def lookup_path_for(file)
-      file[:status] == :renamed ? file[:old_path] : file[:path]
-    end
-
-    def fallback_pattern?(path)
-      matches_any?(Riptide.configuration.fallback_patterns, path)
-    end
-
-    # True when source_patterns is unset (the original, unscoped behavior)
-    # or path matches one of the app's declared patterns.
-    def in_source_scope?(path)
-      patterns = Riptide.configuration.source_patterns
-      patterns.empty? || matches_any?(patterns, path)
-    end
-
-    def matches_any?(patterns, path)
-      patterns.any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME | File::FNM_EXTGLOB) }
+      full = File.join(@root, path)
+      @current[path] = File.file?(full) ? Diff.blob_sha(full) : nil
     end
   end
 end

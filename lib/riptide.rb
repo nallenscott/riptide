@@ -1,99 +1,64 @@
 # frozen_string_literal: true
 
+module Riptide
+  class Error < StandardError; end
+end
+
 require_relative "riptide/version"
 require_relative "riptide/configuration"
+require_relative "riptide/tracer"
 require_relative "riptide/diff"
-require_relative "riptide/collector"
-require_relative "riptide/collector/minitest_hooks"
-require_relative "riptide/store/ranges"
+require_relative "riptide/source"
+require_relative "riptide/change"
+require_relative "riptide/analysis/ruby"
+require_relative "riptide/analysis/sql"
+require_relative "riptide/analysis/schema"
+require_relative "riptide/analysis/fixture"
+require_relative "riptide/layout"
+require_relative "riptide/analyzer"
+require_relative "riptide/resolver"
+require_relative "riptide/collectors"
+require_relative "riptide/inputs"
+require_relative "riptide/env"
+require_relative "riptide/git"
 require_relative "riptide/store"
 require_relative "riptide/selector"
 require_relative "riptide/runner"
-require_relative "riptide/cli"
+require_relative "riptide/recorder"
+require_relative "riptide/session"
 
 module Riptide
-  class Error < StandardError; end
-
   class << self
+    # Turns riptide on and starts tracing, so call it before the app loads:
+    # the tracer has to see class bodies run, and the collectors the files
+    # boot reads and lists.
     def configure
       yield configuration
+      @configured = true
+      warn "[riptide] configure ran after the app loaded, so its boot isn't recorded" if app_loaded?
+      Tracer.install(configuration.root) unless Tracer.installed?
+      Collectors.install(configuration.root)
+    end
+
+    def configured?
+      @configured == true
     end
 
     def configuration
       @configuration ||= Configuration.new
     end
 
-    # Merge-base against <default_remote>/<default_branch> when that ref
-    # exists, the common ancestor a normal feature branch diverged from.
-    # Falls back to that ref's current tip when merge-base fails, e.g. the
-    # ref hasn't been fetched yet. Still the same ref either way: a bare
-    # branch name isn't a valid fallback, a CI checkout has no local
-    # branch by that name, only the remote-tracking ref.
-    def default_base
-      ref = "#{configuration.default_remote}/#{configuration.default_branch}"
-      Diff.merge_base(ref)
-    rescue Error
-      ref
+    def app_loaded?
+      defined?(::Rails.application) && ::Rails.application&.initialized?
     end
 
-    # { relative_path => [[class_name, method_name], ...] }, every test
-    # method Minitest currently knows about, grouped by the file it's
-    # defined in via Method#source_location, not a naming convention.
-    # Shared by the CLI and the Minitest plugin, the two places that
-    # gather this to hand to Selector. methods_matching, not
-    # runnable_methods: the latter sorts/shuffles based on Minitest.seed,
-    # which isn't set yet this early in the plugin's case, before
-    # Minitest.run's arg parsing has run, and neither pruning nor
-    # selection needs run order, just the raw set of names.
-    def discovered_tests_by_file(root:)
-      Minitest::Runnable.runnables.each_with_object(Hash.new { |h, k| h[k] = [] }) do |klass, mapping|
-        klass.methods_matching(/^test_/).each do |method|
-          file = klass.instance_method(method).source_location&.first
-          next unless file
-
-          mapping[file.delete_prefix("#{root}/")] << [klass.name, method]
-        end
+    # Every [class_name, method_name] Minitest knows about in this process.
+    # methods_matching rather than runnable_methods, which shuffles by a
+    # seed that isn't set yet when plugins start.
+    def discovered_tests
+      Minitest::Runnable.runnables.flat_map do |klass|
+        klass.methods_matching(/^test_/).map { |method| [klass.name, method] }
       end
-    end
-
-    # The flat [class_name, method_name] pairs discovered_tests_by_file
-    # groups by file. Shared by prune_stale_tests! and by the CLI and the
-    # Minitest plugin's own total counts, the three places that otherwise
-    # each re-flatten this by hand.
-    def known_tests(discovered_tests_by_file)
-      discovered_tests_by_file.values.flatten(1)
-    end
-
-    # Deletes every Store row for a test not in discovered_tests_by_file --
-    # a renamed or deleted test's rows, which nothing else ever cleans up.
-    # Kept separate from discovered_tests_by_file itself: discovery is a
-    # pure read, this is a deliberate mutation, and merging them would mean
-    # anyone calling discover for an unrelated reason silently triggers a
-    # deletion. Safe to call unconditionally as long as
-    # discovered_tests_by_file reflects this process's full, unsharded
-    # suite, not a partial or filtered view -- a scoped list here would
-    # prune tests that still exist, just weren't in view this run.
-    def prune_stale_tests!(store:, discovered_tests_by_file:)
-      store.prune_except(known_tests(discovered_tests_by_file))
-    end
-
-    # What to run: a Decision, and the base it was decided against (nil for
-    # the bootstrap case below, there's nothing to compare against yet).
-    # Shared by the CLI and the Minitest plugin, the two places that need a
-    # decision, so an empty store or a computed base only has one
-    # definition to agree on, not two that can quietly drift apart.
-    #
-    # An empty store forces a full run and reports why, rather than
-    # comparing against base at all: everything for this app is unknown
-    # yet, not just the files in whatever diff happens to exist right now.
-    def decide(store:, root:, discovered_tests_by_file:)
-      if store.empty?
-        return [Selector::Decision.new(mode: :full, reason: "no dependency map yet", selected: []), nil]
-      end
-
-      base = default_base
-      decision = Selector.new(store: store, root: root, discovered_tests_by_file: discovered_tests_by_file).select(base: base)
-      [decision, base]
     end
   end
 end
