@@ -33,10 +33,17 @@ module Riptide
       @warned = Set.new
     end
 
-    # A test running alongside another one in a different thread can't have
-    # its lines told apart, so it runs unrecorded and gets selected next time.
+    # A started record goes out before every test, so a test that never
+    # finishes, from a hang, a crash or a kill, counts as a failure. A test
+    # running alongside another one in a different thread can't have its
+    # lines told apart, so only its outcome is recorded.
     def record(test)
-      return yield unless @window.try_lock
+      started(test)
+      unless @window.try_lock
+        result = yield
+        outcome(test, result)
+        return result
+      end
 
       begin
         Tracer.open_window
@@ -68,19 +75,49 @@ module Riptide
     private
 
     # Load facts come first: a class that loaded during this test feeds what
-    # the test depends on. A skipped test didn't run, so it records nothing.
-    # A failure to record leaves the test's result alone, and the test gets
-    # selected next time.
+    # the test depends on. A skipped test closes its start with nothing. A
+    # failure to trace still records the outcome, so a failure still counts.
     def persist(test, result, traced, window)
       absorb_load_facts
-      return if result.nil? || result.skipped?
+      return outcome(test, result) if result.nil? || result.skipped? || !result.passed?
 
       inputs, owner_sets = @inputs.for_test(traced, window)
       sets = [@env_set] + owner_sets.values.map { |files| share(files) }
-      @store.append_run(Store::Run.new(test: [test.class.name, test.name], at: Time.now.to_f, passed: result.passed?,
-                                       sets: sets, inputs: inputs))
+      @store.append_run(Store::Run.new(test: key(test), at: Time.now.to_f, passed: true, sets: sets, inputs: inputs, file: file(test)))
     rescue StandardError => e
       warn "[riptide] couldn't record #{test.class.name}##{test.name}: #{e.class}: #{e.message}" if @warned.add?(e.class)
+      outcome(test, result)
+    end
+
+    def started(test)
+      @store.append_start(key(test))
+    rescue StandardError
+      nil
+    end
+
+    # Records how the test ended without what it ran. A skip is no outcome.
+    def outcome(test, result)
+      return if result.nil?
+
+      run = Store::Run.new(test: key(test), at: Time.now.to_f, passed: result.passed? || result.skipped?, file: file(test))
+      run.passed = nil if result.skipped?
+      @store.append_run(run)
+    rescue StandardError
+      nil
+    end
+
+    def key(test) = [test.class.name, test.name]
+
+    # The file that defines the test's class, relative to the root. A test
+    # a library generates, like shoulda's `should`, lives in its class's
+    # file too. Nil when that's outside the app.
+    def file(test)
+      path = Object.const_source_location(test.class.name)&.first
+      root = "#{File.realpath(@inputs.root)}/"
+      path = path && File.realpath(path)
+      path.delete_prefix(root) if path&.start_with?(root)
+    rescue StandardError
+      nil
     end
 
     def share(files)

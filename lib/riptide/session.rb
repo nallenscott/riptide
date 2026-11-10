@@ -27,24 +27,32 @@ module Riptide
                         boot_lines: Tracer.drain_boot_lines, boot_reads: boot_reads, boot_globs: boot_globs)
       tests = Riptide.discovered_tests
 
-      select(store, layout, inputs, env, tests) unless @config.mode == :record
-
       recorder = Recorder.new(store: store, inputs: inputs, env_set: Store.set_id(env))
       recorder.absorb_load_facts
       store.append_set(Store.set_id(env), env)
-      store.append_discovered(tests)
       Recorder.install(recorder)
+      select(store, layout, inputs, tests) unless @config.mode == :record
     rescue StandardError => e
       warn "[riptide] #{@config.suite}: off for this run, #{e.class}: #{e.message}"
     end
 
     private
 
-    def select(store, layout, inputs, env, tests)
+    # What the selection found about each unit's runs goes in the log, so
+    # publishing can tell which held here. A selection that fails leaves
+    # every test running, still recorded.
+    def select(store, layout, inputs, tests)
       analyzer = Analyzer.new(layout: layout, blobs: store.method(:read_blob), load_facts: store.method(:load_facts))
-      decision = Selector.new(store: store, analyzer: analyzer, root: @root, tests: tests, listing: inputs.method(:listing)).select
+      selector = Selector.new(indexes: store.indexes, analyzer: analyzer, root: @root, tests: tests,
+                              listing: inputs.method(:listing))
+      decision = selector.select
+      store.append_selected(decision.selected.map { |entry| entry[:test] })
+      selector.hits.each { |index, hits| store.append_hits(index, hits.keys) if index.ref }
       report(decision)
       Runner.new(decision: decision).apply if @config.mode == :enforce
+      decision
+    rescue StandardError => e
+      warn "[riptide] #{@config.suite}: running every test, #{e.class}: #{e.message}"
     end
 
     def report(decision)

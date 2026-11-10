@@ -5,48 +5,87 @@ require "digest"
 require "fileutils"
 require "securerandom"
 require "set"
-require "tempfile"
 
 module Riptide
-  # Recorded runs, kept in git under refs/riptide/<suite>:
+  # Recorded runs and open failures, kept in git. A unit is one suite's
+  # record for one build: a branch, keyed branches/<branch>, or a PR, keyed
+  # prs/<number>. It's two refs, written and deleted together:
   #
-  #   runs/<ab>/<test key>   the newest runs of one test
-  #   sets/<id>              files a group of tests depends on together: one
-  #                          process's env, or what one class's loading ran
-  #   loads/<blob sha>       which classes each line of a file version ran for
-  #   blobs/<blob sha>       a pin that keeps a recorded file version fetchable
+  #   refs/riptide/runs/<suite>/<key>     a tag wrapping the Index's tree
+  #   refs/riptide/stamps/<suite>/<key>   a tag wrapping a small tree:
+  #     format                            the index's format
+  #     runs                              the runs tag it pairs with
+  #     marks/<ab>                        per test, its open failures' ids
+  #     landing/target                    for a PR, the branch it merges into
+  #     landing/base/..., landing/tested/... the paths it changed, at the
+  #                                       merge base and as tested
   #
-  # Test processes read the ref and append to their own log file, so a
-  # read-only .git is enough while tests run. #publish folds the logs into
-  # a new commit and pushes it. Runs describe immutable file versions, so
-  # merging two writers' runs is a union.
+  # The refs point at tags, not commits, so a push uploads only the objects
+  # the host doesn't already have. The stamp lets a build read every PR's
+  # open failures and landing record without downloading its runs, and its
+  # date is when the unit was last written.
+  #
+  # `Store.fetch` leaves exactly the units a build reads as local refs, so
+  # test processes read every local unit of their suite from a read-only
+  # .git and append to their own log. #publish folds the logs into the
+  # build's unit and pushes it.
   class Store
-    # +sets+ are the ids of the shared sets the run depends on, +inputs+ the
-    # files it depended on directly.
-    Run = Struct.new(:test, :at, :passed, :sets, :inputs, keyword_init: true)
+    # A test process's outcome for a test. +sets+ and +inputs+ are nil when
+    # riptide couldn't trace what the test ran. +file+ is where the test is
+    # defined.
+    Run = Struct.new(:test, :at, :passed, :sets, :inputs, :file, keyword_init: true)
 
-    SQUASH_AFTER = 100
-    PUBLISH_ATTEMPTS = 10
-    # How long pruning keeps runs of a test the pruning build didn't
-    # discover: one that exists on a branch and not yet on main.
-    PRUNE_GRACE = 14 * 86_400
-    ZERO = "0" * 40
+    # Who a build is. +key+ names its unit, +upstream+ the branch whose unit
+    # it also reads, and for a PR, the branch it merges into. A harvesting
+    # build reads the PRs that landed in +branch+.
+    Build = Struct.new(:key, :upstream, :branch, :pr, :harvest, keyword_init: true) do
+      def self.pr(number, target:) = new(key: "prs/#{number}", upstream: target, pr: true, harvest: false)
+      def self.branch(name, upstream: nil, harvest: false) = new(key: "branches/#{Store.escape(name)}", upstream: upstream, branch: name, harvest: harvest)
 
-    # Commits on the ref are riptide's, and a CI container has no git
-    # identity of its own.
-    IDENTITY = %w[AUTHOR COMMITTER].each_with_object({}) do |role, env|
-      env["GIT_#{role}_NAME"] = "riptide"
-      env["GIT_#{role}_EMAIL"] = "riptide@users.noreply.github.com"
-    end.freeze
+      def upstream_key = upstream && "branches/#{Store.escape(upstream)}"
+    end
 
-    attr_reader :ref
+    Published = Struct.new(:ref, :runs, :harvested, :deleted, keyword_init: true)
 
-    # A set's id comes from its content, so tests sharing a class share one.
+    ROOT = "refs/riptide/"
+    RUNS = "#{ROOT}runs/".freeze
+    STAMPS = "#{ROOT}stamps/".freeze
+    TARGET = "#{ROOT}target".freeze
+    RETRY = "refs/riptide-retry/"
+
+    # A unit nobody wrote for this long gets deleted, like a PR closed
+    # without merging.
+    EXPIRY = 30 * 24 * 60 * 60
+
+    # How long a publish keeps retrying a lost race.
+    BUDGET = 120
+
+    # A set's id in the logs comes from its content, so tests sharing a
+    # class share one.
     def self.set_id(files) = Digest::SHA1.hexdigest(JSON.generate(files.sort.to_h))[0, 16]
 
-    def initialize(root:, suite:, log_dir:, remote: nil, retained_runs: 4)
+    # One ref segment per name, so feature/a can't nest under feature.
+    def self.escape(name) = name.gsub("%", "%25").gsub("/", "%2F")
+
+    # Brings in the units +build+ reads, for every suite, and nothing else:
+    # every local riptide ref goes first. A harvesting build also ages out
+    # idle units and checks which PRs landed in HEAD. Riptide only reads,
+    # so anything going wrong here means reading less.
+    def self.fetch(root:, build:, remote: "origin")
+      git = Git.new(root)
+      git.delete_refs(git.refs(ROOT).keys + git.refs(RETRY).keys)
+      keys = [build.key, build.upstream_key].compact.uniq
+      specs = keys.flat_map { |key| %W[+#{RUNS}*/#{key}:#{RUNS}*/#{key} +#{STAMPS}*/#{key}:#{STAMPS}*/#{key}] }
+      specs << "+#{STAMPS}*:#{STAMPS}*" if build.harvest
+      specs << "+refs/heads/#{build.upstream}:#{TARGET}" if build.pr
+      git.run("fetch", "--quiet", "--atomic", "--no-tags", "--refmap=", "--no-write-fetch-head", remote, *specs)
+      Harvest.new(git, build, remote).run if build.harvest
+    end
+
+    def initialize(root:, suite:, log_dir:, remote: "origin", retained_runs: 4)
+      @root = root
       @git = Git.new(root)
-      @ref = "refs/riptide/#{suite}"
+      @suite = Store.escape(suite)
       @log_dir = log_dir
       @remote = remote
       @retained_runs = retained_runs
@@ -54,117 +93,301 @@ module Riptide
       @log_pid = nil
     end
 
+    def runs_ref(key) = "#{RUNS}#{@suite}/#{key}"
+    def stamp_ref(key) = "#{STAMPS}#{@suite}/#{key}"
+
     # Reading
 
-    # { [class_name, method_name] => [Run, ...] }, newest first.
-    def runs(tests)
-      wanted = tests.to_h { |test| [key_for(test), test] }
-      result = Hash.new { |h, k| h[k] = [] }
-      tree.each do |path, sha|
-        test = wanted[path.split("/").last] if path.start_with?("runs/")
-        JSON.parse(@git.read(sha)).each { |run| result[test] << run_from(run) } if test
-      end
-      log_records("run").each { |run| result[run["test"]] << run_from(run) if wanted.key?(key_for(run["test"])) }
-      result.transform_values { |test_runs| newest(test_runs) }
-    end
-
-    # { path => facets } of a shared set, or nil for one the store doesn't
-    # have.
-    def set(id)
-      @sets ||= {}
-      return @sets[id] if @sets.key?(id)
-
-      @sets[id] = if (sha = tree["sets/#{id}"])
-                    JSON.parse(@git.read(sha))
-                  else
-                    log_records("set").find { |set| set["id"] == id }&.fetch("files")
-                  end
+    # Every unit of the suite fetch left, then the logs not yet published,
+    # as they were the first time anything asked.
+    def indexes
+      @indexes ||= local_units.map { |key, (runs, stamp)| unit(key, runs, stamp) } << logs
     end
 
     # { line => { "owners" => [class name, ...], "called" => bool } } for a
     # file version, or nil when no recorded process loaded it.
     def load_facts(sha)
-      facts = nil
-      if (blob = tree["loads/#{sha}"])
-        facts = parse_lines(JSON.parse(@git.read(blob)))
-      end
-      log_records("load").each do |record|
-        next unless record["sha"] == sha
+      found = indexes.filter_map { |index| index.load_facts(sha) }
+      return nil if found.empty?
 
-        facts = merge_lines(facts || {}, parse_lines(record["lines"]))
-      end
-      facts
+      model = Index::Model.new
+      found.each { |lines| model.merge_loads(sha, lines) }
+      model.loads[sha].to_h { |line, fact| [line.to_i, fact] }
     end
 
     def read_blob(sha) = @git.read(sha)
 
     # Writing, from test processes
 
+    def append_start(test) = write_record({ "type" => "start", "test" => test, "at" => Time.now.to_f })
     def append_run(run) = write_record({ "type" => "run" }.merge(run.to_h.transform_keys(&:to_s)))
     def append_set(id, files) = write_record({ "type" => "set", "id" => id, "files" => files })
     def append_load_facts(sha, lines) = write_record({ "type" => "load", "sha" => sha, "lines" => lines })
-    def append_discovered(tests) = write_record({ "type" => "discovered", "tests" => tests })
+
+    # The tests this process's selection picked. A test it skipped already
+    # has a run that holds, so a new pass adds nothing.
+    def append_selected(tests) = write_record({ "type" => "selected", "tests" => tests })
+
+    # The runs of +index+ this process's tree no longer matches. The rest
+    # held here, and they're what harvesting copies.
+    def append_hits(index, ids) = write_record({ "type" => "hits", "ref" => index.ref, "runs" => ids.sort })
 
     # Publishing
 
-    # Folds every log into a new commit on the ref and, with a remote,
-    # pushes it. +prune+ drops runs of tests no process in these logs
-    # discovered and nothing ran lately, which only makes sense for a build
-    # that discovers the whole suite, like main.
-    def publish(prune: false, now: Time.now.to_f)
+    # Folds every log into +build+'s unit and pushes it. A harvesting build
+    # first copies the passing runs and open failures of the PRs that
+    # landed, and afterwards deletes their units.
+    #
+    # The logs go either way, so a later build never folds in this one's.
+    def publish(build:)
       logs = Dir.glob(File.join(@log_dir, "log-*.jsonl")).sort
       records = logs.flat_map { |path| read_log(path) }
+      seen = local_units.values.flat_map { |_, stamp| stamp ? marks_at(stamp).values.flat_map(&:to_a) : [] }.to_set
+      landed = build.harvest ? landed_units(build) : {}
+      runs, stamp = @git.resolve(runs_ref(build.key)), @git.resolve(stamp_ref(build.key))
+      landing = build.pr ? landing_record(build.upstream, stamp) : nil
+      head = @git.tree("HEAD").keys.to_set
+      deadline = Time.now + BUDGET
 
-      PUBLISH_ATTEMPTS.times do
-        fetch
-        base = @git.resolve(@ref)
-        commit, squash = commit_for(base, records, prune: prune && now)
-        if push(commit, base, squash: squash)
-          close_log
-          logs.each { |path| File.delete(path) }
-          @tree = nil
-          return commit
+      loop do
+        model, marks, files = start_from(runs, stamp)
+        harvested, pins = harvest(model, marks, files, landed, records)
+        added = fold(model, marks, files, records, seen)
+        trim(model, marks, files, head)
+        return Published.new(ref: runs_ref(build.key), runs: 0, harvested: 0, deleted: []) if runs.nil? && model.runs.empty? && marks.empty?
+
+        pushed = push(build, model, marks, files, pins, landing, runs, stamp)
+        if pushed
+          @git.delete_refs(landed.flat_map { |key, _| [runs_ref(key), stamp_ref(key)] })
+          @git.run("update-ref", runs_ref(build.key), pushed.first)
+          @git.run("update-ref", stamp_ref(build.key), pushed.last)
+          deleted = landed.empty? ? [] : delete_units(landed)
+          return Published.new(ref: runs_ref(build.key), runs: added, harvested: harvested, deleted: deleted)
         end
+        raise Error, "riptide couldn't publish #{runs_ref(build.key)} before its deadline" if Time.now > deadline
+
+        runs, stamp = refetch(build.key)
       end
-      raise Error, "riptide couldn't publish #{@ref} after #{PUBLISH_ATTEMPTS} attempts"
-    end
-
-    def fetch
-      return unless @remote
-
-      @git.run("fetch", "--quiet", @remote, "+#{@ref}:#{@ref}", allow: [0, 1, 128])
-      @tree = nil
+    ensure
+      close_log
+      logs&.each { |path| FileUtils.rm_f(path) }
     end
 
     private
 
-    def tree
-      @tree ||= @git.tree(@git.resolve(@ref))
+    # { key => [runs tag, stamp tag] } for the suite's local units.
+    def local_units
+      units = Hash.new { |h, k| h[k] = [nil, nil] }
+      @git.refs("#{RUNS}#{@suite}/").each { |ref, tag| units[ref.delete_prefix("#{RUNS}#{@suite}/")][0] = tag }
+      @git.refs("#{STAMPS}#{@suite}/").each { |ref, tag| units[ref.delete_prefix("#{STAMPS}#{@suite}/")][1] = tag }
+      units
     end
 
-    def key_for(test) = Digest::SHA1.hexdigest(JSON.generate(test))
+    # A unit's index. One whose runs are in another format, or missing,
+    # still brings its open failures.
+    def unit(key, runs, stamp)
+      marks = stamp ? marks_at(stamp) : {}
+      return Index.empty(ref: runs_ref(key), marks: marks) unless runs && stamp && format_at(stamp) == Index::FORMAT
 
-    def run_path(test)
-      key = key_for(test)
-      "runs/#{key[0, 2]}/#{key}"
+      tree = @git.tree(runs)
+      Index.new(blobs: ->(path) { (sha = tree[path]) && JSON.parse(@git.read(sha)) }, paths: tree.keys, ref: runs_ref(key), marks: marks)
     end
 
-    def run_from(record)
-      Run.new(test: record["test"], at: record["at"], passed: record["passed"], sets: record["sets"], inputs: record["inputs"])
-    end
+    def format_at(stamp) = @git.read("#{stamp}:format")&.to_i
 
-    def newest(test_runs)
-      test_runs.uniq { |run| [run.at, run.sets] }.sort_by { |run| -run.at }.first(@retained_runs)
-    end
+    # { test => Set of mark ids } from a stamp, with each test's file in
+    # +files+. A stamp with no open failures has no marks/ at all.
+    def marks_at(stamp, files = {})
+      tree = @git.resolve("#{stamp}:marks")
+      return {} unless tree
 
-    def parse_lines(lines) = lines.to_h { |line, fact| [line.to_i, fact] }
-
-    def merge_lines(into, lines)
-      lines.each do |line, fact|
-        known = into[line]
-        into[line] = known ? { "owners" => known["owners"] | fact["owners"], "called" => known["called"] || fact["called"] } : fact
+      @git.tree(tree).each_with_object({}) do |(_, sha), marks|
+        JSON.parse(@git.read(sha)).each do |key, mark|
+          test = JSON.parse(key)
+          files[test] = mark["file"] if mark["file"]
+          marks[test] = mark["ids"].to_set
+        end
       end
-      into
+    end
+
+    def logs
+      model = Index::Model.new
+      marks = {}
+      fold(model, marks, {}, log_records, Set.new)
+      model.retain(@retained_runs)
+      Index.of(model.encode, marks: marks)
+    end
+
+    # The model and open failures a publish starts from.
+    def start_from(runs, stamp)
+      files = {}
+      marks = stamp ? marks_at(stamp, files) : {}
+      index = runs && stamp && unit(nil, runs, stamp)
+      [index && !index.runs.empty? ? index.model : Index::Model.new, marks, files]
+    end
+
+    # The units of PRs that landed in this build's branch: the ones fetch
+    # brought runs for. { key => [runs tag, stamp tag] }
+    def landed_units(build)
+      local_units.select do |key, (runs, stamp)|
+        key.start_with?("prs/") && key != build.key && runs && stamp && @git.read("#{stamp}:runs") == runs
+      end
+    end
+
+    # Copies the passing runs that held here from the landed PRs, with their
+    # load facts, pins and open failures. Returns how many runs, and the
+    # pins.
+    def harvest(model, marks, files, landed, records)
+      hits = Hash.new { |h, k| h[k] = Set.new }
+      read = Set.new
+      records.each do |record|
+        next unless record["type"] == "hits"
+
+        read << record["ref"]
+        hits[record["ref"]].merge(record["runs"])
+      end
+      pins = Set.new
+      count = landed.sum do |key, (runs, stamp)|
+        marks_at(stamp, files).each { |test, ids| (marks[test] ||= Set.new).merge(ids) }
+        source = unit(key, runs, stamp)
+        next 0 if source.runs.empty?
+
+        source = source.model
+        pins.merge(source.pins)
+        source.loads.each { |sha, lines| model.merge_loads(sha, lines) }
+        hit = hits[runs_ref(key)]
+        held = source.runs.values.flatten(1).reject { |id, _| read.include?(runs_ref(key)) && hit.include?(id) }
+        held.sort_by { |_, run| run.at }.count do |_, run|
+          sets = run.sets.map { |id| model.add_set(source.set(id).files, source.set(id).constants) }
+          model.add_run(test: run.test, at: run.at, sets: sets, files: run.files, constants: run.constants, file: source.test_files[run.test])
+        end
+      end
+      [count, pins]
+    end
+
+    # Adds the logs to +model+ and +marks+. A pass of a test selection
+    # picked is evidence, and any pass closes the open failures this build
+    # saw at fetch. A failure, or a test that
+    # started and never finished, opens one. Returns how many runs it added.
+    def fold(model, marks, files, records, seen)
+      sets = records.select { |record| record["type"] == "set" }.to_h { |record| [record["id"], record["files"]] }
+      decided = records.select { |record| record["type"] == "selected" }
+      picked = decided.flat_map { |record| record["tests"] }.to_set
+      ids = {}
+      unfinished = Hash.new(0)
+      added = 0
+      records.select { |record| %w[start run].include?(record["type"]) }.sort_by { |record| record["at"] }.each do |record|
+        test = record["test"]
+        if record["type"] == "start"
+          unfinished[test] += 1
+          next
+        end
+        unfinished[test] -= 1
+        files[test] = record["file"] if record["file"]
+        next if record["passed"].nil?
+
+        unless record["passed"]
+          (marks[test] ||= Set.new) << SecureRandom.hex(16)
+          next
+        end
+        marks[test]&.subtract(seen)
+        marks.delete(test) if marks[test]&.empty?
+        next unless record["inputs"]
+        next if decided.any? && !picked.include?(test)
+
+        set_ids = record["sets"].map { |id| ids[id] ||= sets[id] && model.add_set(*Index::Model.split(sets[id])) }
+        # A run whose shared set the logs lost can't be checked against anything.
+        next if set_ids.include?(nil)
+
+        files, constants = Index::Model.split(record["inputs"])
+        added += 1 if model.add_run(test: test, at: record["at"], sets: set_ids, files: files, constants: constants, file: record["file"])
+      end
+      unfinished.each { |test, count| (marks[test] ||= Set.new) << SecureRandom.hex(16) if count.positive? }
+      records.select { |record| record["type"] == "load" }.each { |record| model.merge_loads(record["sha"], record["lines"]) }
+      added
+    end
+
+    # Keeps each test's newest runs, and drops tests whose file is gone,
+    # runs and open failures alike.
+    def trim(model, marks, files, head)
+      gone = ->(test) { (file = model.test_files[test] || files[test]) && !head.include?(file) }
+      model.retain(@retained_runs, tests: model.runs.keys.reject(&gone))
+      marks.reject! { |test, _| gone.call(test) }
+    end
+
+    # Pushes the unit's runs and a new stamp in one atomic push, leased at
+    # what the fold started from. The two tags, or nil when another build got
+    # there first.
+    def push(build, model, marks, files, pins, landing, runs, stamp)
+      runs_tag = @git.tag_tree(runs_tree(model, pins, runs), "runs")
+      stamp_tag = @git.tag_tree(stamp_tree(marks, files, runs_tag, landing), "stamp")
+      leases = { runs_ref(build.key) => runs, stamp_ref(build.key) => stamp }.map { |ref, old| "--force-with-lease=#{ref}:#{old}" }
+      _, status = @git.run("push", "--quiet", "--atomic", *leases, @remote, "#{runs_tag}:#{runs_ref(build.key)}", "#{stamp_tag}:#{stamp_ref(build.key)}",
+                           allow: [0, 1])
+      [runs_tag, stamp_tag] if status.zero?
+    end
+
+    # Pins keep each recorded file version fetchable. New ones come only
+    # from the commit the build checked out, so a staged or stashed file
+    # never gets pushed. A version that was never committed stays unpinned,
+    # and selection treats it as unavailable.
+    def runs_tree(model, pins, runs)
+      known = runs ? @git.tree(runs).values.to_set : Set.new
+      shas = @git.write_blobs(model.encode.transform_values { |value| JSON.generate(value) }, known: known)
+      pinned = model.pins | pins
+      committed = @git.tree("HEAD").values.to_set
+      model.versions.each { |sha| shas["blobs/#{sha[0, 2]}/#{sha}"] = sha if pinned.include?(sha) || committed.include?(sha) }
+      @git.write_tree(shas)
+    end
+
+    def stamp_tree(marks, files, runs_tag, landing)
+      shards = Hash.new { |h, k| h[k] = {} }
+      marks.each do |test, ids|
+        shards[Index.shard(Index.test_key(test))][Index.test_key(test)] = { "file" => files[test], "ids" => ids.sort }.compact unless ids.empty?
+      end
+      content = { "format" => Index::FORMAT.to_s, "runs" => runs_tag }
+      shards.each { |shard, by_test| content["marks/#{shard}"] = JSON.generate(by_test.sort.to_h) }
+      entries = @git.write_blobs(content).transform_values { |sha| ["100644", sha] }
+      landing&.each { |path, entry| entries["landing/#{path}"] = entry }
+      @git.write_tree(entries)
+    end
+
+    # { path => [mode, object] } for the stamp's landing/ tree: the target,
+    # and the paths this PR changed at its merge base with the target and
+    # as tested. When this build can't work that out, the last stamp's
+    # record stands, so the PR doesn't drop out of main's harvest.
+    def landing_record(target, stamp)
+      base = @git.resolve(TARGET) && @git.merge_base("HEAD", TARGET)
+      unless base
+        warn "[riptide] couldn't find where this PR left #{target}, so its landing record stays as it was"
+        return stamp && @git.entries("#{stamp}:landing")
+      end
+
+      record = { "target" => ["100644", @git.write_blobs({ "target" => target })["target"]] }
+      @git.output("diff-tree", "-r", "-z", "--no-renames", base, "HEAD").split("\0").each_slice(2) do |meta, path|
+        old_mode, new_mode, old_sha, new_sha = meta.delete_prefix(":").split
+        record["base/#{path}"] = [old_mode, old_sha] unless old_mode == "000000"
+        record["tested/#{path}"] = [new_mode, new_sha] unless new_mode == "000000"
+      end
+      record
+    end
+
+    # Deletes the harvested units in one atomic push, leased at what this
+    # build read, so a PR that republished keeps everything.
+    def delete_units(landed)
+      refs = landed.flat_map { |key, (runs, stamp)| [[runs_ref(key), runs], [stamp_ref(key), stamp]] }
+      leases = refs.map { |ref, old| "--force-with-lease=#{ref}:#{old}" }
+      _, status = @git.run("push", "--quiet", "--atomic", *leases, @remote, *refs.map { |ref, _| ":#{ref}" }, allow: [0, 1])
+      status.zero? ? refs.map(&:first) : []
+    end
+
+    # The unit as the remote has it now, in a namespace of its own so no
+    # other suite's local refs move.
+    def refetch(key)
+      unit = "#{@suite}/#{key}"
+      @git.delete_refs(%w[runs stamps].map { |kind| "#{RETRY}#{kind}/#{unit}" }.select { |ref| @git.resolve(ref) })
+      @git.run("fetch", "--quiet", "--no-tags", "--refmap=", "--no-write-fetch-head", @remote, "+#{ROOT}*/#{unit}:#{RETRY}*/#{unit}")
+      [@git.resolve("#{RETRY}runs/#{unit}"), @git.resolve("#{RETRY}stamps/#{unit}")]
     end
 
     def write_record(record)
@@ -189,103 +412,18 @@ module Riptide
       @log_pid = Process.pid
     end
 
-    def log_records(type)
-      @log_records ||= Dir.glob(File.join(@log_dir, "log-*.jsonl")).flat_map { |path| read_log(path) }
-      @log_records.select { |record| record["type"] == type }
+    def log_records
+      @log_records ||= Dir.glob(File.join(@log_dir, "log-*.jsonl")).sort.flat_map { |path| read_log(path) }
     end
 
-    # A line cut short by a process killed mid-write is skipped.
+    # A line cut short by a process killed mid-write is skipped, and its
+    # test counts as started and never finished.
     def read_log(path)
       File.foreach(path).filter_map do |line|
         JSON.parse(line)
       rescue JSON::ParserError
         nil
       end
-    end
-
-    # +prune+ is the time pruning runs from, or false.
-    def commit_for(base, records, prune:)
-      files = @git.tree(base)
-      merge_runs(files, records, prune: prune)
-      merge_sets(files, records)
-      merge_loads(files, records)
-      pin_blobs(files)
-
-      squash = base && @git.output("rev-list", "--count", base).to_i >= SQUASH_AFTER
-      tree = @git.write_tree(files)
-      parents = base && !squash ? ["-p", base] : []
-      [@git.output("commit-tree", tree, *parents, "-m", "riptide #{@ref.delete_prefix("refs/riptide/")}", env: IDENTITY).strip, squash]
-    end
-
-    def merge_runs(files, records, prune:)
-      records.select { |record| record["type"] == "run" }.group_by { |record| record["test"] }.each do |test, new_runs|
-        path = run_path(test)
-        existing = files[path] ? JSON.parse(@git.read(files[path])) : []
-        kept = (new_runs + existing).uniq { |run| [run["at"], run["sets"]] }.sort_by { |run| -run["at"] }.first(@retained_runs)
-        files[path] = @git.write_blob(JSON.generate(kept))
-      end
-      return unless prune
-
-      discovered = records.select { |record| record["type"] == "discovered" }.flat_map { |record| record["tests"] }
-      return if discovered.empty?
-
-      keep = discovered.to_set { |test| run_path(test) }
-      files.reject! do |path, sha|
-        path.start_with?("runs/") && !keep.include?(path) && JSON.parse(@git.read(sha)).all? { |run| run["at"] < prune - PRUNE_GRACE }
-      end
-    end
-
-    def merge_sets(files, records)
-      records.select { |record| record["type"] == "set" }.each do |record|
-        files["sets/#{record["id"]}"] ||= @git.write_blob(JSON.generate(record["files"]))
-      end
-    end
-
-    def merge_loads(files, records)
-      records.select { |record| record["type"] == "load" }.group_by { |record| record["sha"] }.each do |sha, loads|
-        path = "loads/#{sha}"
-        lines = files[path] ? parse_lines(JSON.parse(@git.read(files[path]))) : {}
-        loads.each { |record| merge_lines(lines, parse_lines(record["lines"])) }
-        files[path] = @git.write_blob(JSON.generate(lines.sort.to_h))
-      end
-    end
-
-    # Keeps sets, load facts and pins only for file versions a retained run
-    # still refers to. New pins come from the commit the build checked out,
-    # so a staged or stashed file never gets pushed. A version that was
-    # never committed stays unpinned, and selection treats it as unavailable.
-    def pin_blobs(files)
-      runs = files.select { |path, _| path.start_with?("runs/") }.values.flat_map { |sha| JSON.parse(@git.read(sha)) }
-      set_ids = runs.flat_map { |run| run["sets"] }.to_set
-      files.reject! { |path, _| path.start_with?("sets/") && !set_ids.include?(path.delete_prefix("sets/")) }
-
-      versions = Set.new
-      runs.each { |run| run["inputs"].each_value { |facets| versions << facets["sha"] } }
-      set_ids.each do |id|
-        sha = files["sets/#{id}"]
-        JSON.parse(@git.read(sha)).each_value { |facets| versions << facets["sha"] } if sha
-      end
-
-      files.reject! { |path, _| path.start_with?("loads/") && !versions.include?(path.delete_prefix("loads/")) }
-      pinned = files.keys.grep(%r{\Ablobs/}).to_set { |path| path.delete_prefix("blobs/") }
-      files.reject! { |path, _| path.start_with?("blobs/") }
-      committed = @git.tree(@git.resolve("HEAD")).values.to_set
-      versions.each { |sha| files["blobs/#{sha}"] = sha if pinned.include?(sha) || committed.include?(sha) }
-    end
-
-    def push(commit, base, squash:)
-      unless @remote
-        _, status = @git.run("update-ref", @ref, commit, base || ZERO, allow: [0, 128])
-        return status.zero?
-      end
-
-      lease = base ? "--force-with-lease=#{@ref}:#{base}" : "--force-with-lease=#{@ref}:"
-      args = squash ? [lease] : []
-      _, status = @git.run("push", "--quiet", *args, @remote, "#{commit}:#{@ref}", allow: [0, 1])
-      return false unless status.zero?
-
-      @git.run("update-ref", @ref, commit)
-      true
     end
   end
 end

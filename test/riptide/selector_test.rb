@@ -50,7 +50,7 @@ module Riptide
     def reasons(tests = [TEST], listings: {})
       layout = Layout.new(root: @root)
       analyzer = Analyzer.new(layout: layout, blobs: @store.method(:read_blob), load_facts: @store.method(:load_facts))
-      Selector.new(store: @store, analyzer: analyzer, root: @root, tests: tests, listing: ->(pattern) { listings[pattern] }).select.selected.map { |entry| entry[:reason] }
+      Selector.new(indexes: @store.indexes, analyzer: analyzer, root: @root, tests: tests, listing: ->(pattern) { listings[pattern] }).select.selected.map { |entry| entry[:reason] }
     end
 
     def test_a_test_with_no_recorded_run_is_selected
@@ -67,7 +67,7 @@ module Riptide
     def test_a_test_that_failed_last_time_runs_again
       with_widget do
         record(passed: false)
-        assert_equal ["failed the last time it ran"], reasons
+        assert_equal ["failed and hasn't passed since"], reasons
       end
     end
 
@@ -195,11 +195,11 @@ module Riptide
       $VERBOSE = verbose
     end
 
-    def test_a_run_whose_shared_set_is_missing_is_selected
+    def test_a_run_whose_shared_set_is_missing_counts_as_unrecorded
       with_widget do
         @store.append_run(Store::Run.new(test: TEST, at: 1.0, passed: true, sets: ["0" * 16],
                                          inputs: { "app/widget.rb" => { "sha" => sha, "methods" => ["Widget#limit"] } }))
-        assert_equal ["a shared set it depended on isn't available"], reasons
+        assert_equal ["no recorded run"], reasons
       end
     end
 

@@ -7,6 +7,8 @@ module Riptide
   # alone. Every recorded input names the exact file version it was
   # recorded against, so there's no diff base: the question for each test
   # is whether anything it depended on differs from what's on disk now.
+  # Each recorded version that differs gets analyzed once, and the index
+  # says which runs used the parts that changed.
   class Selector
     Decision = Struct.new(:mode, :selected, :total, keyword_init: true) do
       def summary(limit: 30)
@@ -27,11 +29,10 @@ module Riptide
       end
     end
 
-    FACETS = %w[methods blocks owners tables].freeze
-
-    # +listing+ returns what a recorded glob matches now.
-    def initialize(store:, analyzer:, root:, tests:, listing:)
-      @store = store
+    # +indexes+ hold the recorded runs and open failures, from every unit
+    # the build read and its logs. +listing+ returns what a recorded glob matches now.
+    def initialize(indexes:, analyzer:, root:, tests:, listing:)
+      @indexes = indexes
       @analyzer = analyzer
       @root = root
       @tests = tests
@@ -40,81 +41,86 @@ module Riptide
       @suite_reason = nil
     end
 
+    # { index => { run id => reason } } for the runs that don't hold here,
+    # once #select has run.
+    attr_reader :hits
+
     def select
-      runs = @store.runs(@tests)
+      @hits = @indexes.to_h { |index| [index, hits_in(index)] }
+      if @suite_reason
+        @hits = @indexes.to_h { |index| [index, index.run_ids.to_h { |id| [id, @suite_reason] }] }
+        return Decision.full(@tests, @suite_reason) unless @tests.empty?
+      end
+
       selected = @tests.filter_map do |test|
-        reason = reason_to_run(runs.fetch(test, []))
+        reason = reason_to_run(test)
         { test: test, reason: reason } if reason
       end
-      return Decision.full(@tests, @suite_reason) if @suite_reason && !@tests.empty?
-
       full = !@tests.empty? && selected.size == @tests.size
       Decision.new(mode: full ? :full : :selected, selected: selected, total: @tests.size)
     end
 
     private
 
-    # A test is skipped when any passing run it kept still holds: nothing it
-    # depended on changed in a way that reaches it. A run from another branch
-    # can hold when the newest one doesn't.
-    def reason_to_run(runs)
+    # A test with an open failure runs until a build passes it, since a
+    # failure riptide can't trace, like a flaky one, has nothing else to
+    # rerun it. Otherwise it's skipped when a passing run still holds.
+    def reason_to_run(test)
+      return "failed and hasn't passed since" if @indexes.any? { |index| index.marks[test]&.any? }
+
+      runs = @indexes.flat_map { |index| index.runs.fetch(test, []).map { |run| [run, @hits[index][run.id]] } }
       return "no recorded run" if runs.empty?
-      return "failed the last time it ran" unless runs.first.passed
+      return nil if runs.any? { |_, hit| hit.nil? }
 
-      reasons = runs.select(&:passed).map { |run| unchanged?(run) ? nil : first_reason(run) }
-      reasons.all? ? reasons.first : nil
+      runs.max_by { |run, _| run.at }.last
     end
 
-    # Everything a run depended on: its shared sets, then its own inputs.
-    # nil when a shared set is missing, since then nothing can be checked.
-    def files_of(run)
-      sets = run.sets.map { |id| @store.set(id) }
-      sets.include?(nil) ? nil : sets << run.inputs
-    end
+    # Looks up the runs each recorded version that differs from the tree
+    # reaches, and why.
+    def hits_in(index)
+      hits = {}
+      index.manifest.each do |path, versions|
+        current = current_sha(path)
+        versions.each do |version|
+          next if version == current
 
-    def unchanged?(run)
-      files_of(run)&.all? { |files| files.all? { |path, facets| current_sha(path) == facets["sha"] } }
-    end
-
-    def first_reason(run)
-      groups = files_of(run)
-      return "a shared set it depended on isn't available" unless groups
-
-      read = groups.flat_map { |files| files.values.flat_map { |facets| facets["constants"] || [] } }.to_set
-      groups.each do |files|
-        files.each do |path, facets|
-          reason = reason_for(path, facets, read)
-          return reason if reason
+          changed(index, path, version, current) { |reason, runs| runs.each { |id| hits[id] ||= reason } }
+          return hits if @suite_reason
         end
       end
-      nil
+      hits
     end
 
-    # +read+ holds every constant the run read, in any file. A constant
-    # added here can shadow one read elsewhere, and a dynamic read like
-    # "*::LIMIT" matches a changed constant of that name.
-    def reason_for(path, facets, read)
-      current = current_sha(path)
-      return nil if current == facets["sha"]
-      return "#{Env.constant_name(path)} is defined now" if Env.constant?(path)
-      return "files matching #{path.delete_prefix(Env::GLOB)} were added or removed" if Env.pseudo?(path)
-      return "#{path} was deleted" if current.nil?
+    # Yields the reason and the runs for each part of +version+ that
+    # changed. A constant added here can shadow one read elsewhere, so it
+    # reaches the runs that recorded this version and read that name in any
+    # file. A dynamic read like "*::LIMIT" matches a changed constant of
+    # that name.
+    def changed(index, path, version, current)
+      postings = index.postings(path, version)
+      recorded = -> { index.runs_for(postings["all"]) }
+      return yield("#{Env.constant_name(path)} is defined now", recorded.call) if Env.constant?(path)
+      return yield("files matching #{path.delete_prefix(Env::GLOB)} were added or removed", recorded.call) if Env.pseudo?(path)
+      return yield("#{path} was deleted", recorded.call) if current.nil?
 
-      change = @analyzer.change(path, facets["sha"])
-      return "#{path} changed, and the recorded version isn't in this repository" if change.nil?
-      return nil if change.empty?
+      change = @analyzer.change(path, version)
+      return yield("#{path} changed, and the recorded version isn't in this repository", recorded.call) if change.nil?
+      return if change.empty?
       return suite("#{path} changed top-level code") if change.suite?
-      return "#{path} changed as a whole" if change.whole? || facets["whole"]
+      return yield("#{path} changed as a whole", recorded.call) if change.whole?
 
-      FACETS.each do |facet|
-        hit = facets[facet]&.find { |name| change.public_send(facet).include?(name) }
-        return "#{path} changed #{hit}" if hit
+      yield("#{path} changed as a whole", index.runs_for(postings["whole"] || []))
+      Index::FACETS.each do |facet|
+        by_name = postings[facet] || {}
+        change.public_send(facet).each { |name| (ids = by_name[name.to_s]) && yield("#{path} changed #{name}", index.runs_for(ids)) }
       end
-      hit = change.constants.find { |name| read.include?(name) }
-      return "#{path} changed #{hit}" if hit
+      return if change.constants.empty?
 
-      hit = change.constants.find { |name| read.include?("*::#{name.split("::").last}") }
-      hit && "#{path} changed #{hit}, which the test may have looked up by name"
+      runs = recorded.call
+      change.constants.each do |name|
+        yield("#{path} changed #{name}", index.runs_for(index.readers(name)) & runs)
+        yield("#{path} changed #{name}, which the test may have looked up by name", index.runs_for(index.readers("*::#{name.split("::").last}")) & runs)
+      end
     end
 
     def suite(reason)

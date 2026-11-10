@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "tempfile"
 
 module Riptide
   class RecorderTest < Minitest::Test
@@ -57,9 +58,16 @@ module Riptide
       end.new("test_go")
     end
 
-    def recorded
-      @store.runs([%w[RecorderCardTest test_go]]).fetch(%w[RecorderCardTest test_go], [])
+    # What the recorder logged, newest first.
+    def logged(type)
+      Dir.glob(File.join(@dir, "*.jsonl")).flat_map { |path| File.readlines(path).map { |line| JSON.parse(line) } }.select { |record| record["type"] == type }
     end
+
+    def recorded(test = %w[RecorderCardTest test_go])
+      logged("run").select { |run| run["test"] == test }.reverse.map { |run| Store::Run.new(**run.except("type").transform_keys(&:to_sym)) }
+    end
+
+    def logged_set(id) = logged("set").find { |set| set["id"] == id }&.fetch("files")
 
     def test_a_run_covers_setup_the_test_and_what_it_used
       test = fixture_test { assert_equal 5, RecorderCard.new.go }
@@ -71,7 +79,7 @@ module Riptide
       assert_includes card["constants"], "RecorderCard::LIMIT"
       assert run.passed
       assert_equal "env1", run.sets.first
-      concern = run.sets.drop(1).map { |id| @store.set(id) }.find { |files| files.key?(@concern) }
+      concern = run.sets.drop(1).map { |id| logged_set(id) }.find { |files| files.key?(@concern) }
       assert_includes concern.fetch(@concern)["owners"], "RecorderCard"
       refute run.inputs.key?(@concern), "what a class's loading ran lives in its shared set, not the run"
     end
@@ -84,14 +92,35 @@ module Riptide
       refute recorded.first.passed
     end
 
-    def test_a_skipped_test_records_nothing
+    def test_a_skipped_test_records_no_outcome
       test = fixture_test { skip "later" }
       @recorder.record(test) { test.run }
 
-      assert_empty recorded
+      assert_equal [[nil, nil]], recorded.map { |run| [run.passed, run.inputs] }
+      assert_equal [%w[RecorderCardTest test_go]], logged("start").map { |start| start["test"] }
     end
 
-    def test_a_test_running_alongside_another_thread_runs_unrecorded
+    # The method comes from somewhere else, like shoulda's generated tests,
+    # and the class's file is what counts.
+    def test_a_pass_records_the_file_that_defines_the_test_s_class
+      path = Object.new.extend(TracedFixture).load_traced("recorder/defined_test.rb", "class RecorderDefinedTest < Minitest::Test\nend\n")
+      Tempfile.create(["gem", ".rb"]) do |gem|
+        RecorderDefinedTest.class_eval("def test_generated = assert(true)", gem.path, 1)
+        test = RecorderDefinedTest.new("test_generated")
+        @recorder.record(test) { test.run }
+
+        assert_equal path, recorded(%w[RecorderDefinedTest test_generated]).first.file
+      end
+    end
+
+    def test_a_test_class_outside_the_app_has_no_file
+      test = fixture_test { assert true }
+      @recorder.record(test) { test.run }
+
+      assert_nil recorded.first.file, "an anonymous class has no file"
+    end
+
+    def test_a_test_running_alongside_another_thread_records_only_its_outcome
       outer = fixture_test { assert true }
       inner = Class.new(Minitest::Test) do
         def self.name = "RecorderInnerTest"
@@ -104,8 +133,8 @@ module Riptide
       end
 
       assert inner_result.passed?
-      assert_empty @store.runs([%w[RecorderInnerTest test_inner]]).fetch(%w[RecorderInnerTest test_inner], [])
-      refute_empty recorded
+      assert_equal [[true, nil]], recorded(%w[RecorderInnerTest test_inner]).map { |run| [run.passed, run.inputs] }, "only its outcome"
+      refute_nil recorded.first.inputs
     end
 
     def test_a_file_git_ignores_is_never_recorded
@@ -133,7 +162,7 @@ module Riptide
 
       _, err = capture_io { recorder.record(test) { test.run } }
 
-      assert_empty recorded
+      assert_nil recorded.first.inputs, "only its outcome"
       assert_match(/recorder\/stale.rb changed after it loaded/, err)
     end
 

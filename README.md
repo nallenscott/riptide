@@ -8,7 +8,7 @@ Test impact analysis for Rails and Minitest. riptide records what each test depe
 
 ## How it works
 
-A recorded run is a fact about exact file versions: which parts of which git blobs a test depended on, and whether it passed. A test is skipped when a passing run it kept still holds, meaning nothing it depended on has changed in a way that reaches it. Selection compares against the working tree, never a base commit, so every branch works the same way. When a pull request merges, main's files are the PR's files, and the runs the PR recorded already match.
+A recorded run is a fact about exact file versions: which parts of which git blobs a passing test depended on. A test is skipped when a passing run it kept still holds, meaning nothing it depended on has changed in a way that reaches it, and it has no open failure. A failure stays open until a later build passes the test, so one riptide can't trace back to code, like a flaky test, still reruns. Selection compares against the working tree, never a base commit, so every branch works the same way. When a pull request merges, main's files are the PR's files, and the runs the PR recorded already match.
 
 A test depends on:
 
@@ -38,7 +38,7 @@ riptide only records files git tracks or would track, so an ignored file like a 
 
 - Ruby >= 3.3
 - Minitest >= 5.1, < 7
-- git
+- git 2.45 or later
 
 ## Setup
 
@@ -69,7 +69,7 @@ Minitest 5 loads every installed plugin file by itself, so riptide does nothing 
 
 | Option | Default | Meaning |
 |---|---|---|
-| `suite` | `"default"` | Names the ref runs are kept under, `refs/riptide/<suite>`. A CI stage that runs a different slice of the tests is its own suite. |
+| `suite` | `"default"` | Names the refs runs are kept under, `refs/riptide/runs/<suite>/...`. A CI stage that runs a different slice of the tests is its own suite. |
 | `mode` | `:record` | `:record` records only. `:dry_run` also prints what it would run. `:enforce` runs only the selected tests. |
 | `fallback_patterns` | Gemfile, Gemfile.lock, config/application.rb, config/environment.rb, config/environments/test.rb, config/initializers/** | Files every test depends on as a whole. |
 | `source_patterns` | every file git knows about | Globs of the files dependencies are recorded on. |
@@ -82,17 +82,37 @@ Minitest 5 loads every installed plugin file by itself, so riptide does nothing 
 
 ## Sharing runs
 
-Runs live in git, under `refs/riptide/<suite>` in the app's own repository. They never touch a branch, and a plain clone doesn't fetch them.
+Runs live in git in the app's own repository, under `refs/riptide/`. They never touch a branch, and a plain clone doesn't fetch them.
+
+Each suite keeps a unit per build: `branches/<branch>` for a branch and `prs/<number>` for a pull request. A unit is two refs, written and deleted together. `refs/riptide/runs/<suite>/<key>` holds the passing runs as an index. `refs/riptide/stamps/<suite>/<key>` holds the open failures and, for a pull request, its landing record: the branch it merges into and the files it changed. Both point at tags wrapping trees, so a publish uploads only what changed.
+
+A pull request build reads its own unit and its target's, and writes its own:
 
 ```bash
-bundle exec riptide fetch --suite unit     # before the tests
+bundle exec riptide fetch --pr 42 --target main
 bundle exec rails test
-bundle exec riptide publish --suite unit   # after them
+bundle exec riptide publish --suite unit --pr 42 --target main
 ```
 
-Test processes only read the ref and append to their own log, so a read-only `.git` is enough while tests run. `publish` folds the logs into a new commit and pushes it. Runs describe immutable file versions, so two builds publishing at once merge by union, and the one that lost the race retries. The ref only pins file versions from the commit the build checked out, so nothing staged, stashed or uncommitted gets pushed.
+A build of a long-lived branch like main harvests:
 
-Pass `--prune` on builds that discover the whole suite, like main, to drop runs of tests that no longer exist. A test that ran in the last two weeks stays, since it may only exist on a branch that hasn't merged yet.
+```bash
+bundle exec riptide fetch --branch main --harvest
+bundle exec rails test
+bundle exec riptide publish --suite unit --branch main --harvest
+```
+
+A release branch cut from main also reads main's unit, with `--branch stable --harvest --upstream main`.
+
+`fetch` runs once before the tests and brings in every suite's units for the build, and nothing else: test processes read every unit riptide has locally. They only read refs and append to their own log, so a read-only `.git` is enough while tests run.
+
+A harvesting fetch also brings every pull request's stamp, a few KB each, and checks which landed. It replays each one's changed files onto the commit it's testing with `git merge-tree`. When that's clean and changes nothing, the pull request's changes are already there, however it merged, and only then does the build fetch its runs. A pull request that hasn't landed never reaches main's selection.
+
+`publish` folds the logs into the build's unit. Passes of the tests selection picked become runs, and a test selection skipped already had one that holds. Failures, and tests that started and never finished, open failures. A pass closes the open failures the build saw when it fetched, never one another build opened meanwhile. With `--harvest`, it first copies the passing runs and open failures of the pull requests that landed, then deletes their units. It also deletes any unit nobody wrote for 30 days, like one for a pull request closed without merging. Deleting a unit never skips a test, it only means a test gets run again.
+
+riptide never fails a build. A problem in `fetch` or `publish` prints a warning and exits 0, and means reading or saving less, so more tests run. Every git call has a deadline.
+
+Each runs ref holds an index from file versions to the runs that used each part of them, split into 256 shards so a publish rewrites only the shards that changed. Ids stay put between publishes. The ref only pins file versions from the commit the build checked out, so nothing staged, stashed or uncommitted gets pushed. Two builds publishing the same unit at once push with a lease, and the one that lost the race folds its logs in again and retries.
 
 ## Development
 
