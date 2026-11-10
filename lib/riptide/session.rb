@@ -16,7 +16,7 @@ module Riptide
     # Anything that goes wrong here leaves the suite running in full and
     # unrecorded, the same as without riptide.
     def start
-      boot_reads = Collectors.boot_reads.to_a
+      boot_reads = Collectors.boot_reads.to_a + Tracer.preloaded
       boot_globs = Collectors.boot_globs.to_a
       Collectors.install_frameworks
       git = Git.new(@root)

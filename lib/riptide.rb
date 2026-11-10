@@ -38,7 +38,7 @@ module Riptide
       yield configuration
       @configured = true
       warn "[riptide] configure ran after the app loaded, so its boot isn't recorded" if app_loaded?
-      Tracer.install(configuration.root) unless Tracer.installed?
+      Tracer.install(configuration.root, caller: caller_locations(1, 1).first&.absolute_path) unless Tracer.installed?
       Collectors.install(configuration.root)
     end
 

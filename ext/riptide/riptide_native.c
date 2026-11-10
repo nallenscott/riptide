@@ -1,6 +1,7 @@
-// Riptide::Tracer: one hook for the life of the process. Every in-scope line,
-// method entry and block entry goes to the open test window, or to load facts
-// while its thread is inside a class body, or else to boot lines.
+// Riptide::Tracer: hooks aimed at the app's own code, one per compiled file,
+// so Rails and gems run untraced, plus one process-wide hook for rescues. Every in-scope line, method entry and block
+// entry goes to the open test window, or to load facts while its thread is
+// inside a class body, or else to boot lines.
 
 #include <ruby.h>
 #include <ruby/debug.h>
@@ -28,6 +29,9 @@ static VALUE last_relative = Qfalse;
 static VALUE last_map = Qnil;
 
 static int installed = 0;
+static VALUE targets = Qnil;       // the TracePoints aimed at compiled app files, kept alive
+
+#define EVENTS (RUBY_EVENT_LINE | RUBY_EVENT_CALL | RUBY_EVENT_B_CALL | RUBY_EVENT_CLASS | RUBY_EVENT_END)
 
 static VALUE
 identity_hash(void)
@@ -144,7 +148,9 @@ on_end(void)
 }
 
 // A class body that raises never reaches its end event. Once something
-// shallower rescues the error, the bodies it unwound are done loading.
+// shallower rescues the error, the bodies it unwound are done loading. The
+// rescue clause runs a frame below the one that rescued, so every body at or
+// below its depth was unwound.
 static void
 on_rescue(void)
 {
@@ -152,7 +158,7 @@ on_rescue(void)
     if (NIL_P(stack) || RARRAY_LEN(stack) == 0) return;
 
     long depth = frame_depth();
-    while (RARRAY_LEN(stack) > 0 && FIX2LONG(rb_ary_entry(stack, -1)) > depth) pop_owner(stack);
+    while (RARRAY_LEN(stack) > 0 && FIX2LONG(rb_ary_entry(stack, -1)) >= depth) pop_owner(stack);
 }
 
 // Whether the running frame is a method or block, not a class or module body.
@@ -278,8 +284,30 @@ tracer_install(VALUE self, VALUE prefixes)
 
     roots = rb_ary_freeze(rb_ary_dup(prefixes));
     installed = 1;
-    rb_add_event_hook2((rb_event_hook_func_t)hook, RUBY_EVENT_LINE | RUBY_EVENT_CALL | RUBY_EVENT_B_CALL | RUBY_EVENT_CLASS | RUBY_EVENT_END | RUBY_EVENT_RESCUE, Qnil,
-                       RUBY_EVENT_HOOK_FLAG_SAFE | RUBY_EVENT_HOOK_FLAG_RAW_ARG);
+    // A class body that raises is usually rescued outside the app, so
+    // rescues are heard everywhere. They're rare enough to cost nothing.
+    rb_add_event_hook2((rb_event_hook_func_t)hook, RUBY_EVENT_RESCUE, Qnil, RUBY_EVENT_HOOK_FLAG_SAFE | RUBY_EVENT_HOOK_FLAG_RAW_ARG);
+    return Qnil;
+}
+
+static void
+target_hook(VALUE tpval, void *data)
+{
+    (void)data;
+    hook(Qnil, rb_tracearg_from_tracepoint(tpval));
+}
+
+// Aims the hook at +iseq+, a compiled app file, and every method and block in
+// it. Code outside the app never fires it.
+static VALUE
+tracer_target(VALUE self, VALUE iseq)
+{
+    (void)self;
+    VALUE tracepoint = rb_tracepoint_new(0, EVENTS, target_hook, 0);
+    VALUE options = rb_hash_new();
+    rb_hash_aset(options, ID2SYM(rb_intern("target")), iseq);
+    rb_funcallv_kw(tracepoint, rb_intern("enable"), 1, &options, RB_PASS_KEYWORDS);
+    rb_ary_push(targets, tracepoint);
     return Qnil;
 }
 
@@ -380,7 +408,9 @@ Init_riptide_native(void)
     load_called = rb_hash_new();
     owner_files = identity_hash();
     boot_lines = rb_hash_new();
+    targets = rb_ary_new();
 
+    rb_gc_register_address(&targets);
     rb_gc_register_address(&roots);
     rb_gc_register_address(&scope_cache);
     rb_gc_register_address(&stacks);
@@ -397,6 +427,7 @@ Init_riptide_native(void)
 
     rb_define_singleton_method(mTracer, "_install", tracer_install, 1);
     rb_define_singleton_method(mTracer, "installed?", tracer_installed_p, 0);
+    rb_define_singleton_method(mTracer, "_target", tracer_target, 1);
     rb_define_singleton_method(mTracer, "open_window", tracer_open_window, 0);
     rb_define_singleton_method(mTracer, "_close_window", tracer_close_window, 0);
     rb_define_singleton_method(mTracer, "_drain_load_facts", tracer_drain_load_facts, 0);

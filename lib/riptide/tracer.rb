@@ -13,21 +13,31 @@ module Riptide
       # file edited mid-run can be told apart from the version that ran.
       # Ruby keeps whichever path a file was required by, so a root reached
       # through a symlink matches by either name.
-      def install(root)
+      def install(root, caller: nil)
         root = File.expand_path(root)
         prefixes = [root, File.realpath(root)].uniq.map { |path| "#{path}/" }
         _install(prefixes)
         @compiled = {}
+        @preloaded = ($LOADED_FEATURES + [caller].compact).uniq.filter_map do |path|
+          prefixes.find { |prefix| path.start_with?(prefix) }&.then { |prefix| path.delete_prefix(prefix) }
+        end
         @compile_hook = TracePoint.new(:script_compiled) do |tp|
-          path = tp.instruction_sequence.absolute_path || tp.instruction_sequence.path
+          iseq = tp.instruction_sequence
+          path = iseq.absolute_path || iseq.path
           prefix = path && prefixes.find { |candidate| path.start_with?(candidate) }
           next unless prefix
 
+          _target(iseq)
           stat = File.stat(path) rescue next
           @compiled[path.delete_prefix(prefix)] ||= [stat.mtime.to_r, stat.size]
         end
         @compile_hook.enable
       end
+
+      # App files that loaded before the tracer was installed, like the test
+      # helper that installs it. Nothing can trace them, so every test
+      # depends on them whole.
+      def preloaded = @preloaded || []
 
       # What ran since the window opened: { path => [line, ...] }, and the
       # classes of the receivers of every in-scope method called.

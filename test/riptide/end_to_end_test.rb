@@ -240,6 +240,20 @@ module Riptide
       end
     end
 
+    # The test helper loads before riptide can trace anything, so in an app
+    # that records its tests, every test depends on all of it.
+    def test_editing_the_test_helper_reruns_the_suite
+      with_project do |dir|
+        helper = HELPER.sub('["app/**/*.rb"]', '["app/**/*.rb", "test/**/*.rb"]')
+        write(dir, "test/test_helper.rb", helper)
+        git(dir, "commit", "-qam", "record tests")
+        build(dir)
+        write(dir, "test/test_helper.rb", helper + "SETTING = 1\n")
+
+        assert_equal %w[test_both test_other test_widget], build(dir), @reasons.inspect
+      end
+    end
+
     def test_a_file_git_ignores_is_never_recorded_or_pushed
       with_project do |dir, remote|
         write(dir, ".gitignore", "tmp/\nconfig/master.key\n")
