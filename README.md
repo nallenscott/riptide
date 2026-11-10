@@ -8,22 +8,49 @@ Test impact analysis for Rails and Minitest. riptide records what each test depe
 
 ## How it works
 
-A recorded run is a fact about exact file versions: which parts of which git blobs a passing test depended on. A test is skipped when a passing run it kept still holds, meaning nothing it depended on has changed in a way that reaches it, and it has no open failure. A failure stays open until a later build passes the test, so one riptide can't trace back to code, like a flaky test, still reruns. Selection compares against the working tree, never a base commit, so every branch works the same way. When a pull request merges, main's files are the PR's files, and the runs the PR recorded already match.
+riptide records what each test touches while it runs. When the code changes, it reruns only the tests whose recorded dependencies the change reaches.
 
-A test depends on:
+Every recorded run names the exact file versions it depended on, and riptide compares them with the files on disk, never with a base commit. So a pull request, main and a release branch all work the same way, however a PR merged.
 
-- the methods and blocks it ran, during setup, the test itself and teardown
-- the constants it read, and for a constant whose value ran code at load, that code too
-- the classes it used: the ones it called methods on, and ActiveRecord models it created or loaded without running a line of their file
-- the code that ran while those classes loaded, like a concern's `included` block, and the constants that code read
-- the database tables its SQL touched
-- the files it read, the directories it listed, the files it checked for, and the locale files if it translated anything
-- the classes it looked up by name, and the names it looked up that weren't there
-- what every test in the process shares: the code that ran at boot, the files boot read, and the files in any directory the app's boot code listed, like `Dir["test/support/**/*.rb"]`
+### What a test depends on
 
-When a file changes, riptide compares the recorded version with the one on disk and works out what changed. A change anywhere in a method or block selects the tests that ran it, including lines Ruby never reports running, like `else`, `rescue` or the second line of a call's arguments. A constant selects the tests that read it, including through `self.class::LIMIT` or `const_get(:LIMIT)`, which match any constant of that name in a file the test used. A declaration like `belongs_to` or `validates` selects the tests that used the class. A new method selects the tests that used its class when it could take over a call, from an ancestor, an attribute, `method_missing`, another file that reopens the class, or a class from outside the app like `String`. A schema change selects the tests that touched the table. Comments and moved lines select nothing.
+- **Code it ran:** the methods and blocks it ran, during setup, the test itself and teardown.
+- **Constants:** the constants it read, and for a constant whose value ran code at load, that code too.
+- **Classes:**
+  - the ones it called methods on;
+  - ActiveRecord models it created or loaded without running a line of their file;
+  - the code that ran while those classes loaded, like a concern's `included` block, and the constants that code read.
+- **The database:** the tables its SQL touched.
+- **Files:** the files it read, the directories it listed, the files it checked for, and the locale files if it translated anything.
+- **Names:** the classes it looked up by name, and the names it looked up that weren't there.
+- **Shared setup:** what every test in the process shares. That's the code that ran at boot, the files boot read, and the files in any directory boot listed, like `Dir["test/support/**/*.rb"]`.
 
 riptide only records files git tracks or would track, so an ignored file like a key never ends up in a recorded run.
+
+### What a change selects
+
+When a file differs from the version a test recorded, riptide works out what changed in it and selects the tests that used that part.
+
+| Change | Tests it selects |
+|---|---|
+| Anything inside a method or block, including lines Ruby never reports running, like `else`, `rescue` or the second line of a call's arguments | The tests that ran it |
+| A constant's value | The tests that read it, including through `self.class::LIMIT` or `const_get(:LIMIT)` |
+| A declaration, like `belongs_to`, `validates` or `scope` | The tests that used the class |
+| A new method that could take over a call, from an ancestor, an attribute, `method_missing`, another file reopening the class, or a core class like `String` | The tests that used the class |
+| A table in `db/structure.sql` or `db/schema.rb`, or its fixtures | The tests that touched the table |
+| A file a test read, a directory it listed, or a name it found missing that now exists | The tests that did that |
+| A file in `fallback_patterns`, like `Gemfile.lock` or an initializer | Every test |
+| Top-level code that runs at boot | Every test |
+| A deleted file, or a recorded version git no longer has | The tests that recorded it |
+| Comments, blank lines and moved code | Nothing |
+
+A test that failed keeps running until a later build passes it, so a failure riptide can't trace back to code, like a flaky test, still reruns. A test with no recorded run always runs.
+
+### How runs move between builds
+
+1. A pull request build reads its own runs and its target branch's, and saves its own.
+2. main and stable read the runs of the pull requests that landed in them, found with `git merge-tree`, and keep the ones that still hold. An unmerged pull request never reaches them.
+3. Once main has a pull request's runs, it deletes that pull request's record. Anything nobody wrote to for 30 days goes too.
 
 ### What it can't see
 
