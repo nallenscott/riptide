@@ -26,6 +26,14 @@ module Riptide
       assert_equal [2, 3, 4], lines.fetch(path), "the def line is the method being called"
     end
 
+    # Ruby has nothing to hook in a file with no code, like an initializer
+    # that's all comments, and loading it must still work.
+    def test_a_file_with_no_code_loads
+      load_traced("empty/comments.rb", "# nothing to run here\n")
+
+      assert_nil Tracer.broken
+    end
+
     def test_a_window_ignores_code_outside_the_root
       lines = traced { [3, 1, 2].sort }
 

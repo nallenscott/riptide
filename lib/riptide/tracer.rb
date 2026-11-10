@@ -27,12 +27,28 @@ module Riptide
           prefix = path && prefixes.find { |candidate| path.start_with?(candidate) }
           next unless prefix
 
-          _target(iseq)
+          target(iseq, path)
           stat = File.stat(path) rescue next
           @compiled[path.delete_prefix(prefix)] ||= [stat.mtime.to_r, stat.size]
         end
         @compile_hook.enable
       end
+
+      # Aims the tracer at a compiled app file. A file with no code in it,
+      # like one that's all comments, has nothing to trace. Anything else
+      # that goes wrong leaves the file untraced, so the tracer is broken for
+      # this process. The app, in the middle of loading the file, never sees
+      # the error.
+      def target(iseq, path)
+        _target(iseq)
+      rescue ArgumentError
+        nil
+      rescue StandardError => e
+        @broken ||= "couldn't trace #{path}: #{e.class}: #{e.message}"
+      end
+
+      # Why the tracer missed code, or nil when it saw everything.
+      attr_reader :broken
 
       # App files that loaded before the tracer was installed, like the test
       # helper that installs it. Nothing can trace them, so every test
