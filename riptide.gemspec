@@ -20,7 +20,7 @@ Gem::Specification.new do |spec|
   # Ruby 3.3 ships Prism, which reads the structure of every changed file.
   spec.required_ruby_version = ">= 3.3"
 
-  spec.files = Dir["lib/**/*.rb", "ext/**/*.{rb,c,h}", "exe/*"] + ["riptide.gemspec"]
+  spec.files = Dir["lib/**/*.rb", "ext/**/*.{rb,c,h}", "ext/**/REVISION", "exe/*"] + ["riptide.gemspec"]
   spec.bindir = "exe"
   spec.executables = ["riptide"]
   spec.require_paths = ["lib"]

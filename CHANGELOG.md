@@ -2,6 +2,7 @@
 
 - Rebuilt around recorded runs keyed by git blob sha, with selection against the working tree instead of a diff base
 - A tracer that sees classes load, so load-time code belongs to the classes it ran for
+- The tracer hooks the VM's trace instructions in app code only, so YJIT keeps everything it compiled, and each line costs a test one hit however often it runs
 - Changes are analyzed by what changed: methods and blocks as a whole, constants, declarations, tables and whole files
 - Tests depend on the classes they called methods on, looked up by name, or read constants from, plus the directories they listed and the files they checked for
 - Only files git knows about are recorded, and only versions from the checked-out commit are pushed

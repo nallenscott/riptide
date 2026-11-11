@@ -215,6 +215,147 @@ module Riptide
       assert_equal({ 1 => true }, Tracer.drain_boot_lines.fetch(path))
     end
 
+    def test_every_window_hears_a_line_however_often_the_last_one_ran_it
+      path = load_traced("repeat/counter.rb", <<~RUBY)
+        module TracerCounter
+          def self.count(n)
+            total = 0
+            n.times { |i| total += i }
+            total
+          end
+        end
+      RUBY
+
+      first = traced { TracerCounter.count(500) }
+      second = traced { TracerCounter.count(3) }
+
+      assert_equal [2, 3, 4, 5], first.fetch(path)
+      assert_equal [2, 3, 4, 5], second.fetch(path)
+    end
+
+    def test_a_branch_a_window_skips_is_left_out
+      path = load_traced("repeat/branch.rb", <<~RUBY)
+        module TracerBranch
+          def self.pick(n)
+            if n.even?
+              :even
+            else
+              :odd
+            end
+          end
+        end
+      RUBY
+
+      assert_equal [2, 3, 4], traced { TracerBranch.pick(2) }.fetch(path)
+      assert_equal [2, 3, 6], traced { TracerBranch.pick(3) }.fetch(path)
+    end
+
+    def test_code_a_window_ran_is_a_load_fact_when_a_class_body_runs_it_again
+      helper = load_traced("repeat/helper.rb", <<~RUBY)
+        module TracerSharedHelper
+          def self.setting
+            value = :on
+            value
+          end
+        end
+      RUBY
+      Tracer.drain_load_facts
+
+      Tracer.open_window
+      TracerSharedHelper.setting
+      load_traced("repeat/user.rb", <<~RUBY)
+        class TracerHelperUser
+          SETTING = TracerSharedHelper.setting
+        end
+      RUBY
+      lines = Tracer.close_window.lines
+
+      assert_equal [2, 3, 4], lines.fetch(helper)
+      assert_equal({ "owners" => ["TracerHelperUser"], "called" => true }, Tracer.drain_load_facts.fetch(helper).fetch(4))
+    end
+
+    def test_a_line_tracepoint_still_hears_lines_the_tracer_turned_off
+      path = load_traced("repeat/watched.rb", <<~RUBY)
+        module TracerWatched
+          def self.go
+            value = :went
+            value
+          end
+        end
+      RUBY
+      Tracer.open_window
+      TracerWatched.go
+      heard = []
+      watcher = TracePoint.new(:line) { |tp| heard << tp.lineno if tp.path.end_with?(path) }
+      watcher.enable { 2.times { TracerWatched.go } }
+      lines = Tracer.close_window.lines
+
+      assert_equal [3, 4, 3, 4], heard
+      assert_equal [2, 3, 4], lines.fetch(path)
+      assert_equal [2, 3, 4], traced { TracerWatched.go }.fetch(path)
+    end
+
+    # The VM's own trace hooks only show what YJIT would skip in a process
+    # where YJIT compiles everything it can, from the first call.
+    def test_yjit_compiling_the_callers_never_hides_a_line
+      skip "this Ruby has no YJIT" unless defined?(RubyVM::YJIT)
+
+      result = in_yjit(<<~RUBY)
+        File.write("\#{root}/hot.rb", <<~APP)
+          module Hot
+            def self.pick(n)
+              if n.even?
+                :even
+              else
+                :odd
+              end
+            end
+          end
+        APP
+        load "\#{root}/hot.rb"
+        windows = [0, 1, 0, 1].map do |odd|
+          Riptide::Tracer.open_window
+          200.times { |n| Hot.pick(n * 2 + odd) }
+          Riptide::Tracer.close_window.lines.fetch("hot.rb")
+        end
+        { windows: windows, compiled: RubyVM::YJIT.runtime_stats[:compiled_iseq_count] }
+      RUBY
+
+      assert_equal [[2, 3, 4], [2, 3, 6], [2, 3, 4], [2, 3, 6]], result[:windows]
+      assert_operator result[:compiled], :>, 0, "YJIT compiled the callers"
+    end
+
+    def test_loading_app_files_leaves_yjit_s_compiled_code_alone
+      skip "this Ruby has no YJIT" unless defined?(RubyVM::YJIT)
+
+      result = in_yjit(<<~RUBY)
+        3.times { |i| File.write("\#{root}/warm_\#{i}.rb", "module Warm\#{i}; def self.go = \#{i}; end\\n") }
+        before = RubyVM::YJIT.runtime_stats[:invalidation_count]
+        3.times { |i| load "\#{root}/warm_\#{i}.rb" }
+        { invalidations: RubyVM::YJIT.runtime_stats[:invalidation_count] - before }
+      RUBY
+
+      assert_equal 0, result[:invalidations]
+    end
+
+    def test_line_coverage_counts_every_run_alongside_the_tracer
+      result = in_subprocess(<<~RUBY)
+        require "coverage"
+        Coverage.start(lines: true)
+        File.write("\#{root}/covered.rb", "module Covered\\n  def self.go\\n    :went\\n  end\\nend\\n")
+        load "\#{root}/covered.rb"
+        windows = 2.times.map do
+          Riptide::Tracer.open_window
+          3.times { Covered.go }
+          Riptide::Tracer.close_window.lines.fetch("covered.rb")
+        end
+        { windows: windows, coverage: Coverage.result.fetch("\#{root}/covered.rb")[:lines] }
+      RUBY
+
+      assert_equal [[2, 3], [2, 3]], result[:windows]
+      assert_equal [1, 1, 6, nil, nil], result[:coverage]
+    end
+
     def test_a_forked_child_keeps_its_window
       path = load_traced("fork/work.rb", <<~RUBY)
         module TracerForkWork
@@ -245,6 +386,31 @@ module Riptide
 
     def test_closing_without_a_window_raises
       assert_raises(RuntimeError) { Tracer.close_window }
+    end
+
+    private
+
+    # Runs +body+ in a fresh Ruby with the tracer rooted at an empty `root`,
+    # and returns what the body returns.
+    def in_subprocess(body, *flags)
+      script = <<~RUBY
+        $LOAD_PATH.unshift(#{File.expand_path("../../lib", __dir__).dump})
+        require "riptide/tracer"
+        require "tmpdir"
+        root = File.realpath(Dir.mktmpdir)
+        Riptide::Tracer.install(root)
+        result = begin
+        #{body}
+        end
+        STDOUT.write(Marshal.dump(result))
+      RUBY
+      output = IO.popen([RbConfig.ruby, *flags, "-e", script], &:read)
+      assert $?.success?, "the subprocess failed"
+      Marshal.load(output)
+    end
+
+    def in_yjit(body)
+      in_subprocess(body, "--yjit", "--yjit-call-threshold=1")
     end
   end
 end

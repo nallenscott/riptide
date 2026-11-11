@@ -63,7 +63,7 @@ A test that failed keeps running until a later build passes it, so a failure rip
 
 ## Requirements
 
-- Ruby >= 3.3
+- Ruby 4.0.7. The tracer builds against Ruby's internal headers, and riptide ships them per version, so on any other Ruby it installs but stays off.
 - Minitest >= 5.1, < 7
 - git 2.45 or later
 
