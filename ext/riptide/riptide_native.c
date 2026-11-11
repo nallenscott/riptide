@@ -15,6 +15,8 @@
 // gets from Ruby's source. On a Ruby without them the tracer says so and
 // riptide records nothing.
 
+#include "riptide_build.h"
+
 #ifndef RIPTIDE_UNSUPPORTED
 
 #include "vm_core.h"
@@ -667,6 +669,7 @@ Init_riptide_native(void)
 {
     VALUE mTracer = rb_define_module_under(rb_define_module("Riptide"), "Tracer");
     rb_define_const(mTracer, "SUPPORTED", Qfalse);
+    rb_define_const(mTracer, "UNSUPPORTED", rb_str_freeze(rb_str_new_cstr(RIPTIDE_UNSUPPORTED)));
     rb_define_singleton_method(mTracer, "installed?", installed_p, 0);
 }
 

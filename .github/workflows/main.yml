@@ -8,16 +8,33 @@ on:
   # Ruby's nightly moves without riptide changing.
   schedule:
     - cron: "0 9 * * 1"
+  workflow_dispatch:
 
 jobs:
+  # Every minor Ruby still maintains from riptide's floor up, as Ruby lists
+  # them, plus the latest release with AddressSanitizer for the tracer reading
+  # the VM wrong. The weekly run adds nightly, and nightly with AddressSanitizer,
+  # where the next minor shows up first.
   versions:
-    uses: ruby/actions/.github/workflows/ruby_versions.yml@master
-    with:
-      engine: cruby
-      min_version: 4.0
-      # Nightly and the latest release with AddressSanitizer, for the tracer
-      # reading the VM wrong.
-      versions: '["asan", "asan-release"]'
+    runs-on: ubuntu-24.04
+    outputs:
+      rubies: ${{ steps.list.outputs.rubies }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        env:
+          NIGHTLY: ${{ github.event_name != 'push' && github.event_name != 'pull_request' }}
+        shell: ruby {0}
+        run: |
+          require "json"
+          require "open-uri"
+          floor = Gem::Specification.load("riptide.gemspec").required_ruby_version
+          maintained = JSON.parse(URI("https://cache.ruby-lang.org/pub/misc/ci_versions/cruby.json").read)
+          rubies = maintained.grep(/\A\d/).select { |minor| floor.satisfied_by?(Gem::Version.new(minor)) }
+          rubies << "asan-release"
+          rubies += %w[head asan] if ENV["NIGHTLY"] == "true"
+          File.write(ENV.fetch("GITHUB_OUTPUT"), "rubies=#{rubies.to_json}\n", mode: "a")
+          puts rubies.inspect
 
   build:
     needs: versions
@@ -27,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ruby: ${{ fromJson(needs.versions.outputs.versions) }}
+        ruby: ${{ fromJson(needs.versions.outputs.rubies) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -39,11 +56,11 @@ jobs:
       - name: Run the default task
         run: bundle exec rake
 
-  # A scheduled failure is usually a Ruby that changed under riptide.
+  # A weekly failure is usually a Ruby that changed under riptide.
   report:
     needs: build
     if: failure() && github.event_name == 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       issues: write
     steps:
@@ -53,10 +70,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          title="Scheduled build failed"
+          title="Weekly build failed"
           number=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number')
           if [ -n "$number" ]; then
             gh issue comment "$number" --body "Failed again: $RUN"
           else
-            gh issue create --title "$title" --body "A Ruby riptide tests against changed. $RUN"
+            gh issue create --title "$title" --body "A Ruby riptide tests against changed under it: $RUN"
           fi

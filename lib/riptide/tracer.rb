@@ -15,7 +15,7 @@ module Riptide
       # through a symlink matches by either name.
       def install(root, caller: nil)
         unless SUPPORTED
-          @broken = "riptide was installed without Ruby #{RUBY_VERSION}'s internal headers, reinstall it with access to GitHub or RIPTIDE_RUBY_SOURCE set"
+          @broken = "riptide was built without its tracer: #{UNSUPPORTED}"
           return
         end
 
