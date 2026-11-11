@@ -9,3 +9,4 @@ Gemfile.lock
 /tmp/
 /lib/riptide/*.bundle
 /lib/riptide/*.so
+/ext/riptide/ruby-*/

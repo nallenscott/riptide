@@ -17,10 +17,10 @@ Gem::Specification.new do |spec|
     "bug_tracker_uri" => "https://github.com/nallenscott/riptide/issues"
   }
 
-  # Ruby 3.3 ships Prism, which reads the structure of every changed file.
-  spec.required_ruby_version = ">= 3.3"
+  # The tracer is built for the VM of Ruby 4.0 and later.
+  spec.required_ruby_version = ">= 4.0"
 
-  spec.files = Dir["lib/**/*.rb", "ext/**/*.{rb,c,h}", "ext/**/REVISION", "exe/*"] + ["riptide.gemspec"]
+  spec.files = Dir["lib/**/*.rb", "ext/**/*.{rb,c,h}", "exe/*"] + ["riptide.gemspec"]
   spec.bindir = "exe"
   spec.executables = ["riptide"]
   spec.require_paths = ["lib"]

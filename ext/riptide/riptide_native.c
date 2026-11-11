@@ -11,9 +11,9 @@
 // window, or to load facts while its thread is inside a class body, or else
 // to boot lines.
 //
-// Hooks this close to the VM need Ruby's internal headers, vendored per
-// version under ruby/. On a Ruby without them the tracer says so and riptide
-// records nothing.
+// Hooks this close to the VM need Ruby's internal headers, which the build
+// gets from Ruby's source. On a Ruby without them the tracer says so and
+// riptide records nothing.
 
 #ifndef RIPTIDE_UNSUPPORTED
 
@@ -333,9 +333,6 @@ tracer_install(VALUE self)
     if (installed) rb_raise(rb_eRuntimeError, "Riptide::Tracer is already installed");
 
     installed = 1;
-    // The VM only looks for hook lists on instruction sequences while this
-    // is above zero. Targeted TracePoints count it up and down around ours.
-    current_ractor()->pub.targeted_hooks_cnt++;
     // A class body that raises is usually rescued outside the app, so
     // rescues are heard everywhere. They're rare enough to cost nothing.
     rb_add_event_hook2((rb_event_hook_func_t)rescue_hook, RUBY_EVENT_RESCUE, Qnil, RUBY_EVENT_HOOK_FLAG_SAFE | RUBY_EVENT_HOOK_FLAG_RAW_ARG);

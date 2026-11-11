@@ -15,13 +15,18 @@ module Riptide
       # through a symlink matches by either name.
       def install(root, caller: nil)
         unless SUPPORTED
-          @broken = "riptide can't trace Ruby #{RUBY_VERSION}"
+          @broken = "riptide was installed without Ruby #{RUBY_VERSION}'s internal headers, reinstall it with access to GitHub or RIPTIDE_RUBY_SOURCE set"
           return
         end
 
         root = File.expand_path(root)
         prefixes = [root, File.realpath(root)].uniq.map { |path| "#{path}/" }
         _install
+        # The VM only looks for hooks on single iseqs while a targeted
+        # TracePoint is on, so one sits on a method nothing calls. Turning it
+        # on costs one YJIT wipe, before the app has compiled anything.
+        @anchor = TracePoint.new(:call) {}
+        @anchor.enable(target: method(:anchor))
         @compiled = {}
         @preloaded = ($LOADED_FEATURES + [caller].compact).uniq.filter_map do |path|
           prefixes.find { |prefix| path.start_with?(prefix) }&.then { |prefix| path.delete_prefix(prefix) }
@@ -53,6 +58,8 @@ module Riptide
       rescue StandardError => e
         @broken ||= "couldn't trace #{relative}: #{e.class}: #{e.message}"
       end
+
+      def anchor = nil
 
       # Why the tracer missed code, or nil when it saw everything.
       attr_reader :broken

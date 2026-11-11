@@ -4,17 +4,30 @@ on:
   push:
     branches:
       - main
-
   pull_request:
+  # Ruby's nightly moves without riptide changing.
+  schedule:
+    - cron: "0 9 * * 1"
 
 jobs:
+  versions:
+    uses: ruby/actions/.github/workflows/ruby_versions.yml@master
+    with:
+      engine: cruby
+      min_version: 4.0
+      # Nightly and the latest release with AddressSanitizer, for the tracer
+      # reading the VM wrong.
+      versions: '["asan", "asan-release"]'
+
   build:
-    runs-on: ubuntu-latest
+    needs: versions
+    # The AddressSanitizer builds only come for 24.04 and later.
+    runs-on: ubuntu-24.04
     name: Ruby ${{ matrix.ruby }}
     strategy:
+      fail-fast: false
       matrix:
-        ruby:
-          - '4.0.7'
+        ruby: ${{ fromJson(needs.versions.outputs.versions) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -25,3 +38,25 @@ jobs:
           bundler-cache: true
       - name: Run the default task
         run: bundle exec rake
+
+  # A scheduled failure is usually a Ruby that changed under riptide.
+  report:
+    needs: build
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Scheduled build failed"
+          number=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "Failed again: $RUN"
+          else
+            gh issue create --title "$title" --body "A Ruby riptide tests against changed. $RUN"
+          fi
