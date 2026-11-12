@@ -37,7 +37,7 @@ When a file differs from the version a test recorded, riptide works out what cha
 | A constant's value | The tests that read it, including through `self.class::LIMIT` or `const_get(:LIMIT)` |
 | A declaration, like `belongs_to`, `validates` or `scope` | The tests that used the class |
 | A new method that could take over a call, from an ancestor, an attribute, `method_missing`, another file reopening the class, or a core class like `String` | The tests that used the class |
-| A table in `db/structure.sql` or `db/schema.rb`, or its fixtures | The tests that touched the table |
+| A table in `db/structure.sql` or `db/schema.rb`, or its fixtures | The tests that touched the table, plus for a foreign key the tests that touched the table it points at |
 | A file a test read, a directory it listed, or a name it found missing that now exists | The tests that did that |
 | A file in `fallback_patterns`, like `Gemfile.lock` or an initializer | Every test |
 | Top-level code that runs at boot, or code a parallel worker runs before its tests | Every test after it |

@@ -319,6 +319,14 @@ module Riptide
       assert_equal ["cards"], sql("btree (user_id)", "btree (user_id, id)").tables.to_a
     end
 
+    def test_a_foreign_key_changes_the_table_it_points_at_too
+      key = "CREATE INDEX index_cards_on_user_id ON public.cards USING btree (user_id);\n\n" \
+            "ALTER TABLE ONLY public.cards\n    ADD CONSTRAINT fk_cards_user FOREIGN KEY (user_id) REFERENCES public.users(id);\n"
+
+      assert_equal %w[cards users], sql("CREATE INDEX index_cards_on_user_id ON public.cards USING btree (user_id);\n", key).tables.to_a.sort
+      assert_equal %w[cards users], sql("user_id bigint\n", "user_id bigint REFERENCES public.users(id)\n").tables.to_a.sort
+    end
+
     def test_a_new_migration_version_changes_nothing
       assert sql("('20260101000000');", "('20260101000000'),\n('20260102000000');").empty?
     end

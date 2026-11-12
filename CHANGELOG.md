@@ -7,6 +7,7 @@
 - A method in a concern's `class_methods` block counts as one of its ClassMethods, so a new one that could take over a class method selects the tests of every class that includes the concern
 - A new method in a concern's `included` or `prepended` block selects the tests of every class that includes it, since it lands ahead of what that class defined before including it
 - A class header counts as the class's declaration through the end of its superclass, so editing a `Struct.new(` that wraps onto more lines selects the class's tests
+- A foreign key in `structure.sql` changes the table it points at too, so tests that touched that table get selected
 - Reordering methods selects nothing unless one moves past a class-level line like `private`
 - Every git call runs under a deadline, including the blob reader and the diffs
 - Tests depend on what ran before them outside any test: boot, a parallel worker's setup, and their own class's setup, like a `before_all`, but not its `after_all`

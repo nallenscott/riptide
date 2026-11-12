@@ -8,6 +8,9 @@ module Riptide
     class Sql
       TABLE = /(?:CREATE (?:UNLOGGED )?TABLE|ALTER TABLE(?: ONLY)?|CREATE (?:UNIQUE )?INDEX .*? ON(?: ONLY)?|CREATE TRIGGER .*? ON|COMMENT ON (?:TABLE|COLUMN)|CREATE (?:MATERIALIZED )?VIEW)\s+(?:IF NOT EXISTS\s+)?((?:"?\w+"?\.)?"?\w+"?)/m
       OWNED_BY = /OWNED BY ((?:"?\w+"?\.)?"?\w+"?)\.\w+/
+      # A foreign key changes what inserts and deletes on the table it points
+      # at can do, so that table changes too.
+      REFERENCES = /REFERENCES\s+((?:"?\w+"?\.)?"?\w+"?)/
       MIGRATIONS = /\AINSERT INTO "?schema_migrations"?/
 
       def initialize(old_text, new_text)
@@ -32,7 +35,9 @@ module Riptide
         return if statement.nil? || statement.match?(MIGRATIONS)
 
         table = statement[OWNED_BY, 1] || statement[TABLE, 1]
-        table ? change.tables << table.delete('"').split(".").last : change.whole!
+        return change.whole! unless table
+
+        [table, *statement.scan(REFERENCES).flatten].each { |name| change.tables << name.delete('"').split(".").last }
       end
 
       # { line => statement text }. Statements end with a semicolon at the
