@@ -28,7 +28,16 @@ module Riptide
     LOADED = [2, 3, 5, 6, 8, 12, 16].to_h { |line| [line, { "owners" => ["Card"], "called" => false }] }
 
     def ruby(from, to, text: CARD, facts: LOADED, overrides: ->(_) { false })
-      Analysis::Ruby.new(text, text.sub(from, to), load_facts: facts, overrides: overrides).change
+      changes(text, text.sub(from, to), facts: facts, overrides: overrides)
+    end
+
+    def changes(old_text, new_text, facts: {}, overrides: ->(_) { false })
+      Analysis::Ruby.new(old_text, new_text, load_facts: facts, overrides: overrides).change
+    end
+
+    # Card with charge moved to the end, written as +definition+.
+    def charge_moved(definition = "  def charge(amount)\n    amount * 2\n  end\n")
+      CARD.sub("  def charge(amount)\n    amount * 2\n  end\n\n", "").sub("  def noop; end\n", "  def noop; end\n\n#{definition}")
     end
 
     def test_a_method_body_edit_changes_that_method
@@ -75,6 +84,106 @@ module Riptide
       change = ruby("  def charge(amount)\n    amount * 2\n  end\n", "")
 
       assert_includes change.methods, "Card#charge"
+    end
+
+    def test_reordering_methods_changes_nothing
+      assert changes(CARD, charge_moved).empty?
+    end
+
+    def test_a_moved_method_that_changed_still_changes
+      assert_equal ["Card#charge"], changes(CARD, charge_moved("  def charge(amount)\n    amount * 3\n  end\n")).methods.to_a
+    end
+
+    def test_a_comment_that_moved_with_a_method_changes_nothing
+      assert changes(CARD, charge_moved("  # Twice over.\n  def charge(amount)\n\n    amount * 2\n  end\n")).empty?
+    end
+
+    # Moving a method below `private` changes who can call it.
+    def test_a_method_moved_across_a_class_level_line_changes
+      text = "class Card\n  def total\n    1\n  end\n\n  def fee\n    2\n  end\n\n  private\n\n  def secret\n    3\n  end\nend\n"
+      moved = text.sub("  def total\n    1\n  end\n\n", "").sub("  def secret\n", "  def total\n    1\n  end\n\n  def secret\n")
+
+      assert_includes changes(text, moved).methods, "Card#total"
+    end
+
+    # An alias names the method as it stands when the class body reaches
+    # it, so moving the method past one changes what loads.
+    def test_a_method_moved_past_an_alias_of_it_changes
+      text = "class Card\n  def total\n    1\n  end\n\n  alias_method :sum, :total\n\n  def fee\n    2\n  end\nend\n"
+      moved = text.sub("  def total\n    1\n  end\n\n", "").sub("  def fee\n    2\n  end\n", "  def fee\n    2\n  end\n\n  def total\n    1\n  end\n")
+
+      assert_includes changes(text, moved).methods, "Card#total"
+    end
+
+    # The same line twice is still two places: a move from after the first
+    # `private` to after the second crosses the `public` between them.
+    def test_a_method_moved_between_identical_class_level_lines_changes
+      text = "class Card\n  private\n\n  def total\n    1\n  end\n\n  public\n\n  def fee\n    2\n  end\n\n  private\n\n  def secret\n    3\n  end\nend\n"
+      moved = text.sub("  def total\n    1\n  end\n\n", "").sub("  def secret\n", "  def total\n    1\n  end\n\n  def secret\n")
+
+      assert_includes changes(text, moved).methods, "Card#total"
+    end
+
+    # A `sig` or `desc` applies to the method right after it, so swapping
+    # that method with another changes both.
+    def test_swapping_the_method_right_after_a_class_level_line_changes_both
+      text = "class Card\n  sig { returns(Integer) }\n  def total\n    1\n  end\n\n  def fee\n    2\n  end\nend\n"
+      moved = "class Card\n  sig { returns(Integer) }\n  def fee\n    2\n  end\n\n  def total\n    1\n  end\nend\n"
+
+      assert_equal ["Card#fee", "Card#total"], changes(text, moved).methods.to_a.sort
+    end
+
+    def test_a_new_method_between_a_sig_and_its_method_changes_that_method
+      text = "class Card\n  sig { returns(Integer) }\n  def total\n    1\n  end\nend\n"
+      added = "class Card\n  sig { returns(Integer) }\n  def fresh\n    0\n  end\n\n  def total\n    1\n  end\nend\n"
+
+      assert_equal ["Card#total"], changes(text, added).methods.to_a
+    end
+
+    def test_editing_a_class_level_line_leaves_the_methods_after_it_alone
+      assert_empty ruby("LIMIT = 5", "LIMIT = 6").methods
+      assert_empty ruby("scope :primary, -> { where(primary: true) }", "scope :primary, -> { where(primary: false) }").methods
+    end
+
+    def test_reordering_methods_after_the_first_one_past_a_line_changes_nothing
+      text = "class Card\n  private\n\n  def total\n    1\n  end\n\n  def fee\n    2\n  end\n\n  def secret\n    3\n  end\nend\n"
+      moved = "class Card\n  private\n\n  def total\n    1\n  end\n\n  def secret\n    3\n  end\n\n  def fee\n    2\n  end\nend\n"
+
+      assert changes(text, moved).empty?
+    end
+
+    # Only the last definition is compared, but an alias between two can
+    # still call the first.
+    def test_editing_a_method_defined_twice_changes_it
+      text = "class Card\n  def total\n    1\n  end\n\n  alias_method :sum, :total\n\n  def total\n    3\n  end\nend\n"
+      moved = text.sub("    1\n", "    2\n")
+
+      assert_equal ["Card#total"], changes(text, moved).methods.to_a
+    end
+
+    # Reopening a class in the same file gives it a second body, and the
+    # first one runs before the second defines anything.
+    def test_a_method_moved_to_another_body_of_its_class_changes
+      text = "class Card\n  def total\n    1\n  end\n\n  def fee\n    2\n  end\nend\n\nclass Card\n  def secret\n    3\n  end\nend\n"
+      moved = "class Card\n  def fee\n    2\n  end\nend\n\nclass Card\n  def total\n    1\n  end\n\n  def secret\n    3\n  end\nend\n"
+
+      assert_includes changes(text, moved).methods, "Card#total"
+    end
+
+    def test_a_method_moved_to_another_class_changes
+      text = "class Card\n  def total\n    1\n  end\n\n  def fee\n    2\n  end\nend\n\nclass Bill\n  def secret\n    3\n  end\nend\n"
+      moved = "class Card\n  def fee\n    2\n  end\nend\n\nclass Bill\n  def total\n    1\n  end\n\n  def secret\n    3\n  end\nend\n"
+      change = changes(text, moved, overrides: ->(name) { name == "Bill#total" })
+
+      assert_includes change.methods, "Card#total"
+      assert_equal ["Bill"], change.owners.to_a
+    end
+
+    def test_reordering_methods_in_a_block_changes_them
+      text = "class Card\n  Row = Struct.new(:a) do\n    def total\n      1\n    end\n\n    def fee\n      2\n    end\n  end\nend\n"
+      moved = "class Card\n  Row = Struct.new(:a) do\n    def fee\n      2\n    end\n\n    def total\n      1\n    end\n  end\nend\n"
+
+      assert_includes changes(text, moved).methods, "Card::Row#total"
     end
 
     def test_adding_a_method_that_overrides_nothing_changes_nothing

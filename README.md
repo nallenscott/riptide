@@ -42,7 +42,7 @@ When a file differs from the version a test recorded, riptide works out what cha
 | A file in `fallback_patterns`, like `Gemfile.lock` or an initializer | Every test |
 | Top-level code that runs at boot | Every test |
 | A deleted file, or a recorded version git no longer has | The tests that recorded it |
-| Comments, blank lines and moved code | Nothing |
+| Comments, blank lines, and methods reordered without crossing a class-level line like `private` | Nothing |
 
 A test that failed keeps running until a later build passes it, so a failure riptide can't trace back to code, like a flaky test, still reruns. A test with no recorded run always runs.
 

@@ -4,6 +4,8 @@
 - A tracer that sees classes load, so load-time code belongs to the classes it ran for
 - The tracer hooks the VM's trace instructions in app code only, so YJIT keeps everything it compiled, and each line costs a test one hit however often it runs
 - Changes are analyzed by what changed: methods and blocks as a whole, constants, declarations, tables and whole files
+- Reordering methods selects nothing unless one moves past a class-level line like `private`
+- Every git call runs under a deadline, including the blob reader and the diffs
 - Tests depend on the classes they called methods on, looked up by name, or read constants from, plus the directories they listed and the files they checked for
 - Only files git knows about are recorded, and only versions from the checked-out commit are pushed
 - Runs are stored in git as a sharded index, one unit per suite and branch or pull request, with `riptide fetch` and `riptide publish`

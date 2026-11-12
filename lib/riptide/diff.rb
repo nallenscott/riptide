@@ -1,8 +1,7 @@
 # frozen_string_literal: true
 
-require "open3"
 require "digest"
-require "tempfile"
+require "tmpdir"
 
 module Riptide
   module Diff
@@ -16,6 +15,11 @@ module Riptide
 
     HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/
 
+    # No git config from anywhere reaches the diff, so a setting like
+    # diff.interHunkContext can't merge hunks on one machine and not another.
+    ISOLATED = { "GIT_CONFIG_NOSYSTEM" => "1", "GIT_CONFIG_GLOBAL" => File::NULL, "GIT_CONFIG_COUNT" => nil,
+                 "GIT_CONFIG_PARAMETERS" => nil, "GIT_DIR" => nil }.freeze
+
     module_function
 
     # Git's blob hash of a file's content, the same as `git hash-object`.
@@ -28,18 +32,16 @@ module Riptide
     def hunks(old_text, new_text)
       return [] if old_text.b == new_text.b
 
-      Tempfile.create("riptide-old", binmode: true) do |old_file|
-        Tempfile.create("riptide-new", binmode: true) do |new_file|
-          old_file.write(old_text)
-          new_file.write(new_text)
-          old_file.flush
-          new_file.flush
-          out, err, status = Open3.capture3("git", "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "--unified=0", old_file.path, new_file.path)
-          # --no-index exits 1 when the files differ.
-          raise Error, "git diff --no-index failed: #{err.strip}" unless [0, 1].include?(status.exitstatus)
-
-          parse(out.b)
-        end
+      # A directory riptide just made, with git stopped from looking above it
+      # for a repository.
+      Dir.mktmpdir("riptide-diff") do |dir|
+        File.binwrite(File.join(dir, "old"), old_text)
+        File.binwrite(File.join(dir, "new"), new_text)
+        env = ISOLATED.merge("GIT_CEILING_DIRECTORIES" => File.dirname(dir))
+        # --text keeps a global attributes file from calling it binary.
+        # --no-index exits 1 when the files differ.
+        out, = Git.new(dir).run("diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "--unified=0", "old", "new", env: env, allow: [0, 1])
+        parse(out.b)
       end
     end
 

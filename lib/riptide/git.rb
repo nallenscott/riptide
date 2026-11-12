@@ -10,9 +10,10 @@ module Riptide
   # are read through one long-lived `git cat-file --batch`.
   #
   # Every command runs in its own process group under a deadline, so a
-  # stalled network call can't hold up a build: the group gets TERM, which
-  # makes git drop its locks, then KILL. Nothing prompts, nothing starts a
-  # gc while tests read .git, and an aborting git leaves no core file.
+  # stalled call can't hold up a build: the group gets TERM, which makes
+  # git drop its locks, then KILL. The batch reader's deadline is per
+  # object. Nothing prompts, nothing starts a gc while tests read .git, and
+  # an aborting git leaves no core file.
   class Git
     DEADLINE = 120
     GRACE = 5
@@ -20,13 +21,14 @@ module Riptide
     ENV_DEFAULTS = { "GIT_TERMINAL_PROMPT" => "0", "GIT_SSH_COMMAND" => "ssh -o BatchMode=yes -o ConnectTimeout=15",
                      "GIT_HTTP_LOW_SPEED_LIMIT" => "1000", "GIT_HTTP_LOW_SPEED_TIME" => "30" }.freeze
 
-    def initialize(root)
+    def initialize(root, deadline: DEADLINE)
       @root = root
+      @deadline = deadline
     end
 
     # [stdout, exit status], where a signal exit is nil. Raises unless the
     # status is in +allow+.
-    def run(*args, input: nil, env: {}, allow: [0], deadline: DEADLINE)
+    def run(*args, input: nil, env: {}, allow: [0], deadline: @deadline)
       out, err, status = spawn(args, input, env, deadline)
       raise Error, "git #{args.first} failed: #{err.strip}" unless allow.include?(status)
 
@@ -37,15 +39,25 @@ module Riptide
 
     # A blob's content, or nil when the repository doesn't have it.
     def read(sha)
-      batch_in, batch_out = batch
+      batch_in, batch_out, = batch
       batch_in.puts(sha)
       header = batch_out.gets
-      return nil if header.nil? || header.end_with?("missing\n")
+      raise IOError, "the reader exited" if header.nil?
+      return nil if header.end_with?("missing\n")
 
       size = header.split.last.to_i
       content = batch_out.read(size)
       batch_out.read(1)
       content
+    rescue IO::TimeoutError, IOError, SystemCallError => e
+      # A stalled or dead reader starts over on the next read.
+      if @batch
+        stdin, stdout, thread = @batch
+        @batch = nil
+        [stdin, stdout].each { |io| io.close unless io.closed? }
+        stop(thread)
+      end
+      raise Error, e.is_a?(IO::TimeoutError) ? "git cat-file timed out after #{@deadline}s" : "git cat-file failed: #{e.message}"
     end
 
     # Every path git tracks or would track: committed, staged, or untracked
@@ -168,8 +180,9 @@ module Riptide
 
     def batch
       @batch ||= begin
-        stdin, stdout, = Open3.popen2("git", "-C", @root, "cat-file", "--batch")
-        [stdin, stdout]
+        stdin, stdout, thread = Open3.popen2(ENV_DEFAULTS.reject { |name, _| ENV.key?(name) }, "git", *CONFIG, "-C", @root, "cat-file", "--batch", pgroup: true, rlimit_core: 0)
+        stdin.timeout = stdout.timeout = @deadline
+        [stdin, stdout, thread]
       end
     end
   end

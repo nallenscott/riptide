@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "digest"
 require "prism"
 require "set"
 
@@ -17,8 +18,13 @@ module Riptide
     # small.
     Unit = Struct.new(:kind, :owner, :name, :line, :block, :head, :parent, keyword_init: true)
 
-    # +header+ and +body+ are line ranges.
-    Method = Struct.new(:name, :owner, :header, :body, keyword_init: true)
+    # +header+ and +body+ are line ranges. +text+ is a digest of the
+    # definition's lines without comments or blank lines, and +slot+ says
+    # which class-level line it comes after, so a method reordered without
+    # crossing one, like a `private` or an `alias_method` naming it, can be
+    # told apart from one that changed. A method defined in a block has no
+    # slot.
+    Method = Struct.new(:name, :owner, :header, :body, :text, :slot, keyword_init: true)
 
     # A constant read: the lexical nesting it was read in, innermost last,
     # the path segments, and whether it started with ::. A +dynamic+ read,
@@ -44,12 +50,16 @@ module Riptide
       @declared = Hash.new { |h, k| h[k] = Set.new }
       @aliases = {}
       @block_starts = Hash.new { |h, k| h[k] = [] }
+      @definitions = Hash.new(0)
+      @bodies = Hash.new(0)
+      @lines = text.lines
       @references = Hash.new { |h, k| h[k] = [] }
       @significant = significant_lines(text, result)
 
       walk_program(result.value)
       collect_references(result.value, [])
       magic_comments(result)
+      @lines = nil
     end
 
     # nil for blank lines, comments and anything outside every unit.
@@ -75,6 +85,12 @@ module Riptide
 
     def references_at(line)
       @references.fetch(line, [])
+    end
+
+    # Whether +name+ is defined once here. When it's defined twice the last
+    # one wins, so reordering them changes which one runs.
+    def defined_once?(name)
+      @definitions[name] == 1
     end
 
     # Whether a class-level statement in +owner+ names +method+, the way
@@ -161,10 +177,10 @@ module Riptide
     end
 
     def walk_program(program)
-      program.statements.body.each do |statement|
+      slots(program.statements.body, "Object").each do |statement, slot|
         case statement
         when Prism::ClassNode, Prism::ModuleNode then walk_namespace(statement, nil)
-        when Prism::DefNode then define_method(statement, "Object", statement)
+        when Prism::DefNode then define_method(statement, "Object", statement, slot: slot)
         # A literal top-level constant is read like any other. One whose
         # value ran code stays top-level, since that code ran at boot.
         when Prism::ConstantWriteNode
@@ -209,10 +225,33 @@ module Riptide
 
     def walk_body(body, owner, singleton: false)
       statements = body.is_a?(Prism::StatementsNode) ? body.body : [body].compact
-      statements.each { |statement| walk_statement(statement, owner, singleton: singleton) }
+      slots(statements, singleton ? "#{owner}." : owner).each { |statement, slot| walk_statement(statement, owner, singleton: singleton, slot: slot) }
     end
 
-    def walk_statement(statement, owner, singleton: false)
+    # Pairs each statement in a body with the class-level line it comes
+    # after: which body of +owner+ this is, that line's digest, and which of
+    # the lines with that digest it is. Methods don't count as lines here,
+    # since reordering them changes nothing. The first method after a line
+    # gets a slot to itself, since a line like `sig` or `desc` applies to
+    # whichever method comes next.
+    def slots(statements, owner)
+      body = @bodies[owner] += 1
+      seen = Hash.new(0)
+      slot = [body]
+      statements.map do |statement|
+        if statement.is_a?(Prism::DefNode) || defines_through_call?(statement)
+          pair = [statement, slot]
+          slot = slot.take(3) + [:after]
+        else
+          digest = Digest::SHA1.hexdigest(statement.slice)
+          slot = [body, digest, seen[digest] += 1]
+          pair = [statement, slot]
+        end
+        pair
+      end
+    end
+
+    def walk_statement(statement, owner, singleton: false, slot: nil)
       case statement
       when Prism::ClassNode, Prism::ModuleNode
         walk_namespace(statement, owner)
@@ -220,10 +259,10 @@ module Riptide
         mark(statement.location.start_line..statement.location.start_line, Unit.new(kind: :declaration, owner: owner, line: statement.location.start_line))
         walk_body(statement.body, owner, singleton: true)
       when Prism::DefNode
-        define_method(statement, owner, statement, singleton: singleton)
+        define_method(statement, owner, statement, singleton: singleton, slot: slot)
       when ->(node) { defines_through_call?(node) }
         # `private def charge` and `memoize def total` define a method too.
-        statement.arguments.arguments.grep(Prism::DefNode).each { |node| define_method(node, owner, statement, singleton: singleton) }
+        statement.arguments.arguments.grep(Prism::DefNode).each { |node| define_method(node, owner, statement, singleton: singleton, slot: slot) }
       when Prism::ConstantWriteNode, Prism::ConstantOrWriteNode, Prism::ConstantAndWriteNode, Prism::ConstantOperatorWriteNode
         define_constant(statement, owner, [owner, statement.name].compact.join("::"))
       when Prism::ConstantPathWriteNode, Prism::ConstantPathOrWriteNode, Prism::ConstantPathAndWriteNode, Prism::ConstantPathOperatorWriteNode
@@ -283,17 +322,22 @@ module Riptide
       walk_blocks(statement, owner, parent: unit, constant: Array(names).first)
     end
 
-    def define_method(node, owner, statement, singleton: false)
+    def define_method(node, owner, statement, singleton: false, slot: nil)
       singleton ||= node.receiver.is_a?(Prism::SelfNode)
       name = "#{owner}#{singleton ? "." : "#"}#{node.name}"
       header_end = (node.rparen_loc || node.parameters&.location || node.name_loc).end_line
       header = node.location.start_line..header_end
       body = (header_end + 1)..node.location.end_line
 
-      @methods[name] = Method.new(name: name, owner: owner, header: header, body: body)
+      @definitions[name] += 1
+      @methods[name] = Method.new(name: name, owner: owner, header: header, body: body, text: digest_of(lines_of(statement)), slot: slot)
       line = statement.location.start_line
       mark(header, Unit.new(kind: :method_header, owner: owner, name: name, line: line))
       mark(body, Unit.new(kind: :method_body, owner: owner, name: name, line: line))
+    end
+
+    def digest_of(lines)
+      Digest::SHA1.hexdigest(lines.select { |line| @significant.include?(line) }.map { |line| @lines[line - 1] }.join)
     end
 
     def statement_unit(kind, owner, name, statement)

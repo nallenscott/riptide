@@ -36,6 +36,7 @@ module Riptide
           hunk.old_lines.each { |line| classify_old(hunk, line) }
           hunk.new_lines.each { |line| classify_new(hunk, line) }
         end
+        shifted
         @change
       end
 
@@ -73,9 +74,39 @@ module Riptide
       # A method that ran as called code while a class loaded, like a macro
       # called from a class body, changes that class too.
       def method_changed(name)
+        return if reordered?(name)
+
         @change.methods << name
         method = @old.methods[name]
         ran_at_load(method.header.begin..method.body.end) if method
+      end
+
+      # A line like `sig` applies to whichever method comes right after it,
+      # so a method that gains or loses one changes even when none of its
+      # own lines did, like the one a moved method used to sit behind.
+      def shifted
+        @old.methods.each do |name, old|
+          new = @new.methods[name]
+          method_changed(name) if new && old.slot && new.slot && behind(old) != behind(new)
+        end
+      end
+
+      # What comes right before a method: another method, a class-level
+      # line, or the start of its body.
+      def behind(method)
+        return :method if method.slot.last == :after
+
+        method.slot.size == 1 ? :start : :line
+      end
+
+      # The same definition between the same class-level lines runs the same,
+      # wherever it moved to among the methods around it.
+      def reordered?(name)
+        old = @old.methods[name]
+        new = @new.methods[name]
+        return false unless old && new && old.slot && @old.defined_once?(name) && @new.defined_once?(name)
+
+        old.slot == new.slot && old.text == new.text
       end
 
       # Without load facts there's no telling whether a block ran at load. A
