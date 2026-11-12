@@ -24,7 +24,7 @@ module Riptide
         Collectors.install_frameworks
         git = Git.new(@root)
         layout = Layout.new(root: @root, schema_path: @config.schema_path, fixtures_path: @config.fixtures_path)
-        store = Store.new(root: @root, suite: @config.suite, log_dir: @config.log_dir, retained_runs: @config.retained_runs)
+        store = Store.new(root: @root, suite: @config.suite, log_dir: @config.log_dir)
         inputs = Inputs.new(layout: layout, files: git.files, source_patterns: @config.source_patterns, locale_patterns: @config.locale_patterns)
         process = lambda do |trace, window|
           Env.capture(inputs: inputs, layout: layout, fallback_patterns: @config.fallback_patterns, locale_patterns: @config.locale_patterns, trace: trace, window: window)

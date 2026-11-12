@@ -12,7 +12,8 @@ module Riptide
     attr_accessor :suite
 
     # Where test processes write their logs until `riptide publish` folds
-    # them into the ref. Defaults to tmp/riptide/<suite>.
+    # them into the ref. Defaults to tmp/riptide/<suite>. Publishing runs
+    # outside the test process, so it needs the same directory as --log-dir.
     attr_writer :log_dir
 
     # :record only records. :dry_run also prints what it would run. :enforce
@@ -34,11 +35,6 @@ module Riptide
 
     attr_accessor :fixtures_path
 
-    # Recorded runs kept per test. A test is skipped when any of them
-    # matches the current tree, so a few let moving between branches reuse
-    # an earlier run.
-    attr_accessor :retained_runs
-
     # When set, the selection is also written here as JSON.
     attr_accessor :plan_path
 
@@ -51,7 +47,6 @@ module Riptide
       @locale_patterns = ["config/locales/**/*"]
       @schema_path = nil
       @fixtures_path = "test/fixtures"
-      @retained_runs = 4
       @plan_path = nil
     end
 

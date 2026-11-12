@@ -105,8 +105,7 @@ Minitest 5 loads every installed plugin file by itself, so riptide does nothing 
 | `locale_patterns` | `config/locales/**/*` | Locale files a test that translated anything depends on. |
 | `schema_path` | `db/structure.sql` or `db/schema.rb` | The schema file, analyzed per table. |
 | `fixtures_path` | `test/fixtures` | Fixture files, analyzed per table. |
-| `retained_runs` | `4` | Runs kept per test. Any of them can make a test skippable, so moving between branches reuses earlier runs. |
-| `log_dir` | `tmp/riptide/<suite>` | Where test processes write runs until they're published. |
+| `log_dir` | `tmp/riptide/<suite>` | Where test processes write runs until they're published. `publish` runs outside the tests, so pass it the same directory with `--log-dir`. |
 | `plan_path` | none | Also writes the selection as JSON. |
 
 ## Sharing runs
@@ -137,7 +136,7 @@ A release branch cut from main also reads main's unit, with `--branch stable --h
 
 A harvesting fetch also brings every pull request's stamp, a few KB each, and checks which landed. It replays each one's changed files onto the commit it's testing with `git merge-tree`. When that's clean and changes nothing, the pull request's changes are already there, however it merged, and only then does the build fetch its runs. A pull request that hasn't landed never reaches main's selection.
 
-`publish` folds the logs into the build's unit. Passes of the tests selection picked become runs, and a test selection skipped already had one that holds. Failures, and tests that started and never finished, open failures. A publish that fails leaves the logs for the next one, so those failures aren't lost. A pass closes the open failures the build saw when it fetched, never one another build opened meanwhile. With `--harvest`, it first copies the passing runs and open failures of the pull requests that landed, then deletes their units. It also deletes any unit nobody wrote for 30 days, like one for a pull request closed without merging. Deleting a unit never skips a test, it only means a test gets run again.
+`publish` folds the logs into the build's unit. Passes of the tests selection picked become runs, and a test selection skipped already had one that holds. Failures, and tests that started and never finished, open failures. It keeps each test's newest 4 runs, or as many as `--retained-runs` says. Any of them can make a test skippable, so moving between branches reuses earlier runs. A publish that fails leaves the logs for the next one, so those failures aren't lost. A pass closes the open failures the build saw when it fetched, never one another build opened meanwhile. With `--harvest`, it first copies the passing runs and open failures of the pull requests that landed, then deletes their units. It also deletes any unit nobody wrote for 30 days, like one for a pull request closed without merging. Deleting a unit never skips a test, it only means a test gets run again.
 
 riptide never fails a build. A problem in `fetch` or `publish` prints a warning and exits 0, and means reading or saving less, so more tests run. Every git call has a deadline.
 

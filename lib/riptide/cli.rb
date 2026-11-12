@@ -16,7 +16,7 @@ module Riptide
   # Riptide never fails a build: anything that goes wrong is a warning, and
   # the command still exits 0. Only a malformed command line exits 1.
   class CLI
-    USAGE = "usage: riptide fetch [identity] | riptide publish --suite NAME [identity] [--log-dir DIR]\n" \
+    USAGE = "usage: riptide fetch [identity] | riptide publish --suite NAME [identity] [--log-dir DIR] [--retained-runs N]\n" \
             "identity: --pr NUMBER --target BRANCH, or --branch NAME [--upstream BRANCH] [--harvest]\n" \
             "both take [--remote NAME] [--root DIR]"
 
@@ -53,7 +53,7 @@ module Riptide
 
       suite = options[:suite]
       log_dir = File.expand_path(options[:log_dir] || "tmp/riptide/#{suite}", options[:root])
-      store = Store.new(root: options[:root], suite: suite, log_dir: log_dir, remote: options[:remote])
+      store = Store.new(root: options[:root], suite: suite, log_dir: log_dir, remote: options[:remote], **options.slice(:retained_runs))
       published = store.publish(build: build)
       @out.puts "[riptide] published #{published.ref}: #{published.runs} new runs, #{published.harvested} harvested"
       published.deleted.each { |ref| @out.puts "[riptide] deleted #{ref}" }
@@ -77,6 +77,11 @@ module Riptide
         parser.on("--harvest") { options[:harvest] = true }
         parser.on("--remote NAME") { |value| options[:remote] = value }
         parser.on("--log-dir DIR") { |value| options[:log_dir] = value }
+        parser.on("--retained-runs N", Integer) do |value|
+          raise OptionParser::InvalidArgument, "--retained-runs #{value}" unless value.positive?
+
+          options[:retained_runs] = value
+        end
         parser.on("--root DIR") { |value| options[:root] = File.expand_path(value) }
       end.parse!(@argv)
       raise OptionParser::MissingArgument, "--suite" if command == "publish" && !options[:suite]
