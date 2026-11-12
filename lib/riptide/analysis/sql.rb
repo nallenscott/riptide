@@ -3,8 +3,8 @@
 module Riptide
   module Analysis
     # A pg_dump structure file: each changed line maps to the statement it's
-    # in, and the statement to its table. Migration versions are ignored,
-    # and anything that isn't about one table changes the file as a whole.
+    # in, and the statement to its tables. Migration versions are ignored,
+    # and anything that isn't about a table changes the file as a whole.
     class Sql
       TABLE = /(?:CREATE (?:UNLOGGED )?TABLE|ALTER TABLE(?: ONLY)?|CREATE (?:UNIQUE )?INDEX .*? ON(?: ONLY)?|CREATE TRIGGER .*? ON|COMMENT ON (?:TABLE|COLUMN)|CREATE (?:MATERIALIZED )?VIEW)\s+(?:IF NOT EXISTS\s+)?((?:"?\w+"?\.)?"?\w+"?)/m
       OWNED_BY = /OWNED BY ((?:"?\w+"?\.)?"?\w+"?)\.\w+/
@@ -12,6 +12,8 @@ module Riptide
       # at can do, so that table changes too.
       REFERENCES = /REFERENCES\s+((?:"?\w+"?\.)?"?\w+"?)/
       MIGRATIONS = /\AINSERT INTO "?schema_migrations"?/
+      SEQUENCE = /(?:CREATE|ALTER) SEQUENCE\s+(?:IF NOT EXISTS\s+)?((?:"?\w+"?\.)?"?\w+"?)/
+      NEXTVAL = /nextval\('((?:"?\w+"?\.)?"?\w+"?)'/
 
       def initialize(old_text, new_text)
         @old_text = old_text
@@ -22,6 +24,7 @@ module Riptide
         change = Change.new
         old_statements = statements(@old_text)
         new_statements = statements(@new_text)
+        @sequences = sequence_tables(old_statements.values + new_statements.values)
         Diff.hunks(@old_text, @new_text).each do |hunk|
           hunk.old_lines.each { |line| classify(change, old_statements[line]) }
           hunk.new_lines.each { |line| classify(change, new_statements[line]) }
@@ -35,10 +38,26 @@ module Riptide
         return if statement.nil? || statement.match?(MIGRATIONS)
 
         table = statement[OWNED_BY, 1] || statement[TABLE, 1]
-        return change.whole! unless table
+        return [table, *statement.scan(REFERENCES).flatten].each { |name| change.tables << bare(name) } if table
 
-        [table, *statement.scan(REFERENCES).flatten].each { |name| change.tables << name.delete('"').split(".").last }
+        # A sequence belongs to the tables that own it or take their ids
+        # from it, like the one pg_dump writes for each new table.
+        tables = statement[SEQUENCE, 1] && @sequences[bare(statement[SEQUENCE, 1])]
+        tables ? change.tables.merge(tables) : change.whole!
       end
+
+      # { sequence => Set of tables }, from OWNED BY and nextval defaults.
+      def sequence_tables(statements)
+        statements.uniq.each_with_object({}) do |statement, sequences|
+          if (owner = statement[OWNED_BY, 1]) && (sequence = statement[SEQUENCE, 1])
+            (sequences[bare(sequence)] ||= Set.new) << bare(owner)
+          elsif (table = statement[TABLE, 1])
+            statement.scan(NEXTVAL).flatten.each { |sequence| (sequences[bare(sequence)] ||= Set.new) << bare(table) }
+          end
+        end
+      end
+
+      def bare(name) = name.delete('"').split(".").last
 
       # { line => statement text }. Statements end with a semicolon at the
       # end of a line; comments and blank lines belong to none.

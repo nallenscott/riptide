@@ -327,6 +327,23 @@ module Riptide
       assert_equal %w[cards users], sql("user_id bigint\n", "user_id bigint REFERENCES public.users(id)\n").tables.to_a.sort
     end
 
+    # pg_dump writes a sequence for each new table, apart from the table.
+    def test_a_sequence_changes_the_tables_that_own_or_use_it
+      table = "CREATE TABLE public.charges (\n    id bigint NOT NULL\n);\n\n"
+      sequence = "CREATE SEQUENCE public.charges_id_seq\n    START WITH 1\n    CACHE 1;\n\n"
+      owned = "#{table}#{sequence}ALTER SEQUENCE public.charges_id_seq OWNED BY public.charges.id;\n\n"
+      added = sql("CREATE FUNCTION", "#{owned}CREATE FUNCTION")
+      refute added.whole?, "a new table's sequence"
+      assert_equal %w[charges], added.tables.to_a
+
+      used = table.sub("id bigint NOT NULL", "id bigint DEFAULT nextval('public.charges_id_seq'::regclass) NOT NULL") + sequence
+      base = STRUCTURE.sub("CREATE FUNCTION", "#{used}CREATE FUNCTION")
+      restarted = Analysis::Sql.new(base, base.sub("CACHE 1", "CACHE 5")).change
+      assert_equal %w[charges], restarted.tables.to_a, "a table that takes its ids from it"
+
+      assert sql("CREATE FUNCTION", "#{sequence}CREATE FUNCTION").whole?, "a sequence no table owns or uses"
+    end
+
     def test_a_new_migration_version_changes_nothing
       assert sql("('20260101000000');", "('20260101000000'),\n('20260102000000');").empty?
     end
