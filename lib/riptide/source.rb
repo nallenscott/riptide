@@ -23,8 +23,10 @@ module Riptide
     # which class-level line it comes after, so a method reordered without
     # crossing one, like a `private` or an `alias_method` naming it, can be
     # told apart from one that changed. A method defined in a block has no
-    # slot.
-    Method = Struct.new(:name, :owner, :header, :body, :text, :slot, keyword_init: true)
+    # slot. One in a concern's included or prepended block lands in each
+    # class that includes the concern, ahead of anything that class defined
+    # before including it, so it's marked +includers+.
+    Method = Struct.new(:name, :owner, :header, :body, :text, :slot, :includers, keyword_init: true)
 
     # A constant read: the lexical nesting it was read in, innermost last,
     # the path segments, and whether it started with ::. A +dynamic+ read,
@@ -306,8 +308,8 @@ module Riptide
       end
     end
 
-    def class_methods?(call, block)
-      call.is_a?(Prism::CallNode) && call.name == :class_methods && call.receiver.nil? && call.block.equal?(block)
+    def concern_block?(call, block, name)
+      call.is_a?(Prism::CallNode) && call.name == name && call.receiver.nil? && call.block.equal?(block)
     end
 
     def defines_through_call?(node)
@@ -328,7 +330,7 @@ module Riptide
 
     # +within+ is the module the method lands in, when that isn't +owner+,
     # the class whose file it's in.
-    def define_method(node, owner, statement, singleton: false, slot: nil, within: owner)
+    def define_method(node, owner, statement, singleton: false, slot: nil, within: owner, includers: false)
       singleton ||= node.receiver.is_a?(Prism::SelfNode)
       name = "#{within}#{singleton ? "." : "#"}#{node.name}"
       header_end = (node.rparen_loc || node.parameters&.location || node.name_loc).end_line
@@ -336,7 +338,7 @@ module Riptide
       body = (header_end + 1)..node.location.end_line
 
       @definitions[name] += 1
-      @methods[name] = Method.new(name: name, owner: owner, header: header, body: body, text: digest_of(lines_of(statement)), slot: slot)
+      @methods[name] = Method.new(name: name, owner: owner, header: header, body: body, text: digest_of(lines_of(statement)), slot: slot, includers: includers)
       line = statement.location.start_line
       mark(header, Unit.new(kind: :method_header, owner: owner, name: name, line: line))
       mark(body, Unit.new(kind: :method_body, owner: owner, name: name, line: line))
@@ -367,10 +369,11 @@ module Riptide
         statements = child.body.is_a?(Prism::StatementsNode) ? child.body.body : [child.body]
         # A concern's class_methods block defines its methods in the
         # concern's ClassMethods, which every includer extends.
-        within = class_methods?(node, child) ? "#{owner}::ClassMethods" : constant || owner
+        within = concern_block?(node, child, :class_methods) ? "#{owner}::ClassMethods" : constant || owner
+        includers = concern_block?(node, child, :included) || concern_block?(node, child, :prepended)
         statements.each do |inner|
           case inner
-          when Prism::DefNode then define_method(inner, constant || owner, inner, within: within)
+          when Prism::DefNode then define_method(inner, constant || owner, inner, within: within, includers: includers)
           when Prism::ClassNode, Prism::ModuleNode then walk_namespace(inner, owner)
           else walk_blocks(inner, owner, parent: parent, constant: constant)
           end

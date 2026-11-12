@@ -61,7 +61,7 @@ module Riptide
         when :method_header, :method_body
           if @old.methods.key?(unit.name)
             method_changed(unit.name)
-          elsif @old.declares?(unit.owner, unit.name[/[#.](.+)\z/, 1]) || @overrides.call(unit.name)
+          elsif @new.methods[unit.name].includers || @old.declares?(unit.owner, unit.name[/[#.](.+)\z/, 1]) || @overrides.call(unit.name)
             @change.owners.merge(@new.names_for(unit.owner))
           end
         when :block_body then new_block(hunk, line, unit)

@@ -202,6 +202,19 @@ module Riptide
       assert_selected class_methods_scenario("    def label = \"audited\"\n")
     end
 
+    # The way ActiveSupport::Concern runs an included block in each includer.
+    INCLUDED = File.join(Dir.tmpdir, "riptide-scenario-included.rb")
+
+    def test_a_concerns_included_block_gains_a_method_the_includer_defined
+      File.write(INCLUDED, "module ScenarioIncluded\n  def included(base = nil, &block)\n    block ? (@block = block) : base.class_eval(&@block)\n  end\nend\n")
+      require INCLUDED
+      auditable = "module Auditable\n  extend ScenarioIncluded\n\n  included do\n    def audited? = true\n  end\nend\n"
+      assert_selected scenario(files: { "app/auditable.rb" => auditable, "app/card.rb" => "class Card\n  def label = \"card\"\n\n  include Auditable\nend\n" },
+                               body: -> { Card.new.label },
+                               edits: { "app/auditable.rb" => auditable.sub("    def audited? = true\n", "    def audited? = true\n    def label = \"audited\"\n") },
+                               reload: ["app/auditable.rb", "app/card.rb"])
+    end
+
     def test_a_class_with_method_missing_gains_the_real_method
       proxy = "class Proxy\n  def method_missing(name, *) = name == :size ? 1 : super\n  def respond_to_missing?(name, p = false) = name == :size || super\nend\n"
       assert_selected scenario(files: { "app/proxy.rb" => proxy }, body: -> { Proxy.new.size },

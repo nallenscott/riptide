@@ -57,6 +57,30 @@ module Riptide
       assert_equal :block_body, kind(7)
     end
 
+    def test_a_concerns_blocks_say_where_their_methods_land
+      source = Source.parse(<<~RUBY)
+        module Auditable
+          included do
+            def tagged = 1
+          end
+
+          prepended do
+            def wrapped = 2
+          end
+
+          class_methods do
+            def audit = 3
+          end
+
+          def plain = 4
+        end
+      RUBY
+
+      assert_equal %w[Auditable#tagged Auditable#wrapped], source.methods.values.select(&:includers).map(&:name).sort
+      assert source.methods.key?("Auditable::ClassMethods#audit")
+      assert_equal "Auditable", source.methods.fetch("Auditable::ClassMethods#audit").owner
+    end
+
     def test_method_headers_and_bodies
       assert_equal :method_header, kind(12)
       assert_equal :method_body, kind(13)
