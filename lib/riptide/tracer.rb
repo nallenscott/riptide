@@ -8,6 +8,18 @@ module Riptide
   module Tracer
     Trace = Struct.new(:lines, :receivers)
 
+    module CoverageWatch
+      def setup(*modes, **options) = watched(modes, options) { super }
+      def start(*modes, **options) = watched(modes, options) { super }
+
+      private
+
+      def watched(modes, options)
+        Tracer.oneshot! if [*modes, options].any? { |mode| mode.is_a?(Hash) && mode[:oneshot_lines] }
+        yield
+      end
+    end
+
     class << self
       # Also notes each file's mtime and size when Ruby compiles it, so a
       # file edited mid-run can be told apart from the version that ran.
@@ -60,6 +72,21 @@ module Riptide
       end
 
       def anchor = nil
+
+      # Oneshot line coverage untraces each line after its first run, and
+      # riptide's hook on that line goes with it, so the two can't run
+      # together. Coverage started before now shows in its results, and a
+      # later start goes through Coverage.start or setup.
+      def watch_coverage
+        return unless defined?(::Coverage)
+
+        ::Coverage.singleton_class.prepend(CoverageWatch) unless ::Coverage.singleton_class < CoverageWatch
+        oneshot! if ::Coverage.running? && ::Coverage.peek_result.each_value.any? { |result| result.is_a?(Hash) && result.key?(:oneshot_lines) }
+      end
+
+      def oneshot!
+        @broken ||= "oneshot line coverage is on, and it turns off riptide's line tracing"
+      end
 
       # Why the tracer missed code, or nil when it saw everything.
       attr_reader :broken

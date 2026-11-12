@@ -366,6 +366,45 @@ module Riptide
       assert_equal({ "eval.rb" => [1] }, lines)
     end
 
+    def test_oneshot_coverage_started_before_riptide_turns_it_off
+      broken = in_subprocess(<<~RUBY)
+        require "coverage"
+        Coverage.start(oneshot_lines: true)
+        File.write("\#{root}/early.rb", "module Early\\nend\\n")
+        load "\#{root}/early.rb"
+        Riptide::Tracer.watch_coverage
+        Riptide::Tracer.broken
+      RUBY
+
+      assert_equal "oneshot line coverage is on, and it turns off riptide's line tracing", broken
+    end
+
+    def test_oneshot_coverage_started_after_riptide_turns_it_off
+      broken = in_subprocess(<<~RUBY)
+        require "coverage"
+        Riptide::Tracer.watch_coverage
+        Coverage.setup(oneshot_lines: true)
+        Riptide::Tracer.broken
+      RUBY
+
+      assert_equal "oneshot line coverage is on, and it turns off riptide's line tracing", broken
+    end
+
+    def test_line_coverage_leaves_riptide_on
+      broken = in_subprocess(<<~RUBY)
+        require "coverage"
+        Coverage.start(lines: true)
+        File.write("\#{root}/early.rb", "module Early\\nend\\n")
+        load "\#{root}/early.rb"
+        Riptide::Tracer.watch_coverage
+        Coverage.result
+        Coverage.start(:all)
+        Riptide::Tracer.broken
+      RUBY
+
+      assert_nil broken
+    end
+
     def test_a_forked_child_keeps_its_window
       path = load_traced("fork/work.rb", <<~RUBY)
         module TracerForkWork

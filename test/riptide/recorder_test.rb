@@ -84,6 +84,25 @@ module Riptide
       refute run.inputs.key?(@concern), "what a class's loading ran lives in its shared set, not the run"
     end
 
+    # A file that loaded mid-test and couldn't be traced leaves every run
+    # after it missing what that file ran.
+    def test_once_the_tracer_misses_code_only_outcomes_are_recorded
+      test = fixture_test do
+        Tracer.instance_variable_set(:@broken, "couldn't trace app/late.rb: boom")
+        assert_equal 5, RecorderCard.new.go
+      end
+      _, warnings = capture_io do
+        @recorder.record(test) { test.run }
+        @recorder.record(test) { test.run }
+      end
+
+      assert_equal [true, true], recorded.map(&:passed)
+      assert_equal [nil, nil], recorded.map(&:inputs)
+      assert_equal "[riptide] stopped recording, couldn't trace app/late.rb: boom\n", warnings
+    ensure
+      Tracer.instance_variable_set(:@broken, nil)
+    end
+
     def test_a_failing_test_is_recorded_as_failed
       test = fixture_test { flunk "nope" }
       result = @recorder.record(test) { test.run }

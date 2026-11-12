@@ -78,6 +78,8 @@ module Riptide
     # the test depends on. A skipped test closes its start with nothing. A
     # failure to trace still records the outcome, so a failure still counts.
     def persist(test, result, traced, window)
+      return outcome(test, result) if untraced?
+
       absorb_load_facts
       return outcome(test, result) if result.nil? || result.skipped? || !result.passed?
 
@@ -87,6 +89,16 @@ module Riptide
     rescue StandardError => e
       warn "[riptide] couldn't record #{test.class.name}##{test.name}: #{e.class}: #{e.message}" if @warned.add?(e.class)
       outcome(test, result)
+    end
+
+    # Once the tracer misses code, like a file it couldn't trace, nothing it
+    # saw after that is complete, so only outcomes get recorded.
+    def untraced?
+      return false unless Tracer.broken
+
+      warn "[riptide] stopped recording, #{Tracer.broken}" if @warned.add?(:untraced)
+      Tracer.drain_load_facts
+      true
     end
 
     def started(test)
