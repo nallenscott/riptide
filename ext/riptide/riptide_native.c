@@ -219,6 +219,8 @@ record_load(VALUE relative, VALUE owner, VALUE lineno, int called)
 static void
 record_window(VALUE relative, long line)
 {
+    /* Code eval'd with a line before 1 doesn't sit on any line of the file. */
+    if (line < 1) return;
     if (relative != last_relative) {
         last_relative = relative;
         last_map = Qnil;

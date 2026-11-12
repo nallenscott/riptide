@@ -356,6 +356,16 @@ module Riptide
       assert_equal [1, 1, 6, nil, nil], result[:coverage]
     end
 
+    def test_code_eval_d_before_line_one_records_only_the_lines_in_the_file
+      lines = in_subprocess(<<~RUBY)
+        Riptide::Tracer.open_window
+        eval("a = 1\\nb = 2\\nc = 3\\n", binding, "\#{root}/eval.rb", -1)
+        Riptide::Tracer.close_window.lines
+      RUBY
+
+      assert_equal({ "eval.rb" => [1] }, lines)
+    end
+
     def test_a_forked_child_keeps_its_window
       path = load_traced("fork/work.rb", <<~RUBY)
         module TracerForkWork
@@ -404,7 +414,11 @@ module Riptide
         end
         STDOUT.write(Marshal.dump(result))
       RUBY
-      output = IO.popen([RbConfig.ruby, *flags, "-e", script], &:read)
+      # A tracer that corrupts memory can hang instead of crashing.
+      output = IO.popen([RbConfig.ruby, *flags, "-e", script]) do |io|
+        Process.kill("KILL", io.pid) unless io.wait_readable(60)
+        io.read
+      end
       assert $?.success?, "the subprocess failed"
       Marshal.load(output)
     end
