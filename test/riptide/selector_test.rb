@@ -57,6 +57,19 @@ module Riptide
       with_widget { assert_equal ["no recorded run"], reasons }
     end
 
+    # Two spec tests with the same describe and it text share a key, so
+    # their runs can't be told apart.
+    def test_tests_that_share_a_key_always_run
+      with_widget do
+        record({ "methods" => ["Widget#limit"] })
+        record({ "methods" => ["Widget#other"] }, at: 2.0)
+        edit(":other", ":changed")
+
+        assert_equal ["shares its name with another test, so their runs can't be told apart"] * 2, reasons([TEST, TEST])
+        assert_empty reasons([TEST]), "one test with that key still skips on a run that holds"
+      end
+    end
+
     def test_an_unchanged_tree_selects_nothing
       with_widget do
         record

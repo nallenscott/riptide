@@ -64,9 +64,12 @@ module Riptide
 
     # A test with an open failure runs until a build passes it, since a
     # failure riptide can't trace, like a flaky one, has nothing else to
-    # rerun it. Otherwise it's skipped when a passing run still holds.
+    # rerun it. Two tests with one name, like specs with the same describe
+    # and it text, record runs nobody can tell apart, so they always run.
+    # Otherwise a test is skipped when a passing run still holds.
     def reason_to_run(test)
       return "failed and hasn't passed since" if @indexes.any? { |index| index.marks[test]&.any? }
+      return "shares its name with another test, so their runs can't be told apart" if shared_names.include?(test)
 
       runs = @indexes.flat_map { |index| index.runs.fetch(test, []).map { |run| [run, @hits[index][run.id]] } }
       return "no recorded run" if runs.empty?
@@ -121,6 +124,10 @@ module Riptide
         yield("#{path} changed #{name}", index.runs_for(index.readers(name)) & runs)
         yield("#{path} changed #{name}, which the test may have looked up by name", index.runs_for(index.readers("*::#{name.split("::").last}")) & runs)
       end
+    end
+
+    def shared_names
+      @shared_names ||= @tests.tally.filter_map { |test, count| test if count > 1 }.to_set
     end
 
     def suite(reason)
