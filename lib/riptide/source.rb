@@ -209,9 +209,13 @@ module Riptide
       end
     end
 
+    # The header runs to the end of the superclass, which can take more than
+    # a line, like `Struct.new(` with its members below.
     def walk_namespace(node, outer)
       name = namespace_name(outer, node)
-      mark(node.location.start_line..node.location.start_line, Unit.new(kind: :declaration, owner: name, line: node.location.start_line))
+      start = node.location.start_line
+      header_end = [node.constant_path, (node.superclass if node.is_a?(Prism::ClassNode))].compact.map { |part| part.location.end_line }.max
+      mark(start..header_end, Unit.new(kind: :declaration, owner: name, line: start))
       walk_body(node.body, name)
     end
 

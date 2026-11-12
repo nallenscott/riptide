@@ -215,6 +215,15 @@ module Riptide
                                reload: ["app/auditable.rb", "app/card.rb"])
     end
 
+    def test_a_struct_member_renamed_in_a_class_header_that_wraps
+      card = "class Card < Struct.new(\n  :number,\n  :limit\n)\nend\n"
+      # A new superclass would clash with the loaded one, so Card goes first,
+      # the way a fresh process wouldn't have it.
+      fresh = "Object.send(:remove_const, :Card) if defined?(Card)\n"
+      assert_selected scenario(files: { "test/fresh.rb" => fresh, "app/card.rb" => card }, test_source: "Card.new(1, 2).limit",
+                               edits: { "app/card.rb" => card.sub(":limit", ":max") }, reload: ["test/fresh.rb", "app/card.rb"])
+    end
+
     def test_a_class_with_method_missing_gains_the_real_method
       proxy = "class Proxy\n  def method_missing(name, *) = name == :size ? 1 : super\n  def respond_to_missing?(name, p = false) = name == :size || super\nend\n"
       assert_selected scenario(files: { "app/proxy.rb" => proxy }, body: -> { Proxy.new.size },

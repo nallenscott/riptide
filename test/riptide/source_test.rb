@@ -81,6 +81,13 @@ module Riptide
       assert_equal "Auditable", source.methods.fetch("Auditable::ClassMethods#audit").owner
     end
 
+    def test_a_class_header_runs_to_the_end_of_its_superclass
+      source = Source.parse("class Card < Struct.new(\n  :number,\n  :limit\n)\n  def go = 1\nend\n")
+
+      assert_equal [[:declaration, "Card"]] * 4, (1..4).map { |line| source.unit_at(line).then { |unit| [unit.kind, unit.owner] } }
+      assert_equal :method_header, source.unit_at(5).kind
+    end
+
     def test_method_headers_and_bodies
       assert_equal :method_header, kind(12)
       assert_equal :method_body, kind(13)
