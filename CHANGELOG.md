@@ -12,6 +12,7 @@
 - Failures stay open until a later build passes the test
 - Main and release branches harvest the pull requests that landed, found with `git merge-tree`, and delete their units, along with any idle for 30 days
 - The plugin only activates after `Riptide.configure`
+- Needs Minitest 5.26.1 or later, the first that installs on Ruby 4, and is tested on it and the newest Minitest 5 and 6
 
 ## [0.1.0] - 2026-09-16
 

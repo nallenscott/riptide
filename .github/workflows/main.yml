@@ -14,11 +14,13 @@ jobs:
   # Every minor Ruby still maintains from riptide's floor up, as Ruby lists
   # them, plus the latest release with AddressSanitizer for the tracer reading
   # the VM wrong. The weekly run adds nightly, and nightly with AddressSanitizer,
-  # where the next minor shows up first.
+  # where the next minor shows up first. Each runs on the oldest Minitest the
+  # gemspec allows and the newest of each major it allows.
   versions:
     runs-on: ubuntu-24.04
     outputs:
       rubies: ${{ steps.list.outputs.rubies }}
+      minitests: ${{ steps.list.outputs.minitests }}
     steps:
       - uses: actions/checkout@v4
       - id: list
@@ -28,23 +30,34 @@ jobs:
         run: |
           require "json"
           require "open-uri"
-          floor = Gem::Specification.load("riptide.gemspec").required_ruby_version
+          spec = Gem::Specification.load("riptide.gemspec")
           maintained = JSON.parse(URI("https://cache.ruby-lang.org/pub/misc/ci_versions/cruby.json").read)
-          rubies = maintained.grep(/\A\d/).select { |minor| floor.satisfied_by?(Gem::Version.new(minor)) }
+          rubies = maintained.grep(/\A\d/).select { |minor| spec.required_ruby_version.satisfied_by?(Gem::Version.new(minor)) }
           rubies << "asan-release"
           rubies += %w[head asan] if ENV["NIGHTLY"] == "true"
-          File.write(ENV.fetch("GITHUB_OUTPUT"), "rubies=#{rubies.to_json}\n", mode: "a")
-          puts rubies.inspect
+
+          allowed = spec.dependencies.find { |dependency| dependency.name == "minitest" }.requirement
+          released = JSON.parse(URI("https://rubygems.org/api/v1/versions/minitest.json").read)
+            .reject { |release| release["prerelease"] }
+            .map { |release| Gem::Version.new(release["number"]) }
+            .select { |version| allowed.satisfied_by?(version) }
+          minitests = ([released.min] + released.group_by { |version| version.segments.first }.values.map(&:max)).uniq.sort.map(&:to_s)
+
+          File.write(ENV.fetch("GITHUB_OUTPUT"), "rubies=#{rubies.to_json}\nminitests=#{minitests.to_json}\n", mode: "a")
+          puts rubies.inspect, minitests.inspect
 
   build:
     needs: versions
     # The AddressSanitizer builds only come for 24.04 and later.
     runs-on: ubuntu-24.04
-    name: Ruby ${{ matrix.ruby }}
+    name: Ruby ${{ matrix.ruby }}, Minitest ${{ matrix.minitest }}
     strategy:
       fail-fast: false
       matrix:
         ruby: ${{ fromJson(needs.versions.outputs.rubies) }}
+        minitest: ${{ fromJson(needs.versions.outputs.minitests) }}
+    env:
+      MINITEST: ${{ matrix.minitest }}
 
     steps:
       - uses: actions/checkout@v4

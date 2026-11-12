@@ -26,12 +26,8 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/riptide/extconf.rb"]
 
-  # 5.1 to match Rails' declared minitest floor (activesupport 7.0 and
-  # 8.1 both require >= 5.1). The plugin API this gem relies on
-  # (register_plugin, init_plugins) is verified identical on 5.27, 6.0.0,
-  # and 6.0.6, the versions checked; 7 doesn't exist yet, capping there
-  # means an incompatible future major fails loudly at bundle install
-  # instead of quietly at runtime.
-  spec.add_dependency "minitest", ">= 5.1", "< 7"
+  # 5.26.1 is the first Minitest that installs on Ruby 4. The cap makes a
+  # major riptide hasn't been tested on fail at install instead of at runtime.
+  spec.add_dependency "minitest", ">= 5.26.1", "< 7"
   spec.add_dependency "prism", ">= 1.0"
 end

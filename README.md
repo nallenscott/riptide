@@ -64,7 +64,7 @@ A test that failed keeps running until a later build passes it, so a failure rip
 ## Requirements
 
 - Ruby >= 4.0. The tracer builds against Ruby's internal headers, which installing riptide downloads from Ruby's source on GitHub. Set `RIPTIDE_RUBY_SOURCE` to a Ruby source tree to skip the download.
-- Minitest >= 5.1, < 7
+- Minitest 5.26.1 or later, below 7
 - git 2.45 or later
 
 ## Setup
