@@ -4,6 +4,7 @@
 - A tracer that sees classes load, so load-time code belongs to the classes it ran for
 - The tracer hooks the VM's trace instructions in app code only, so YJIT keeps everything it compiled, and each line costs a test one hit however often it runs
 - Changes are analyzed by what changed: methods and blocks as a whole, constants, declarations, tables and whole files
+- A method in a concern's `class_methods` block counts as one of its ClassMethods, so a new one that could take over a class method selects the tests of every class that includes the concern
 - Reordering methods selects nothing unless one moves past a class-level line like `private`
 - Every git call runs under a deadline, including the blob reader and the diffs
 - Tests depend on what ran before them outside any test: boot, a parallel worker's setup, and their own class's setup, like a `before_all`, but not its `after_all`

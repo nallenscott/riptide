@@ -26,7 +26,9 @@ module Riptide
   # Failures aren't runs. They're open marks, kept in the unit's stamp and
   # handed in as +marks+: { test => Set of mark ids }.
   class Index
-    FORMAT = 2
+    # Goes up whenever what a run records changes meaning, like how a method
+    # is named, so older runs read as none and their tests run once.
+    FORMAT = 3
     FACETS = %w[methods blocks owners tables].freeze
 
     Run = Struct.new(:id, :test, :at, keyword_init: true)

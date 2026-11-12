@@ -306,6 +306,10 @@ module Riptide
       end
     end
 
+    def class_methods?(call, block)
+      call.is_a?(Prism::CallNode) && call.name == :class_methods && call.receiver.nil? && call.block.equal?(block)
+    end
+
     def defines_through_call?(node)
       node.is_a?(Prism::CallNode) && node.receiver.nil? && node.block.nil? && node.arguments&.arguments&.grep(Prism::DefNode)&.any?
     end
@@ -322,9 +326,11 @@ module Riptide
       walk_blocks(statement, owner, parent: unit, constant: Array(names).first)
     end
 
-    def define_method(node, owner, statement, singleton: false, slot: nil)
+    # +within+ is the module the method lands in, when that isn't +owner+,
+    # the class whose file it's in.
+    def define_method(node, owner, statement, singleton: false, slot: nil, within: owner)
       singleton ||= node.receiver.is_a?(Prism::SelfNode)
-      name = "#{owner}#{singleton ? "." : "#"}#{node.name}"
+      name = "#{within}#{singleton ? "." : "#"}#{node.name}"
       header_end = (node.rparen_loc || node.parameters&.location || node.name_loc).end_line
       header = node.location.start_line..header_end
       body = (header_end + 1)..node.location.end_line
@@ -359,9 +365,12 @@ module Riptide
         @block_starts[block] << block unless @block_starts[block].include?(block)
         mark(lines_of(child.body), Unit.new(kind: :block_body, owner: owner, line: parent.line, block: block, parent: parent))
         statements = child.body.is_a?(Prism::StatementsNode) ? child.body.body : [child.body]
+        # A concern's class_methods block defines its methods in the
+        # concern's ClassMethods, which every includer extends.
+        within = class_methods?(node, child) ? "#{owner}::ClassMethods" : constant || owner
         statements.each do |inner|
           case inner
-          when Prism::DefNode then define_method(inner, constant || owner, inner)
+          when Prism::DefNode then define_method(inner, constant || owner, inner, within: within)
           when Prism::ClassNode, Prism::ModuleNode then walk_namespace(inner, owner)
           else walk_blocks(inner, owner, parent: parent, constant: constant)
           end

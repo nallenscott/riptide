@@ -177,6 +177,31 @@ module Riptide
                                edits: { "app/auditable.rb" => "module Auditable\n  def audited? = true\n\n  def label = \"audited\"\nend\n" })
     end
 
+    # The way ActiveSupport::Concern builds ClassMethods, from outside the app.
+    CONCERN = File.join(Dir.tmpdir, "riptide-scenario-concern.rb")
+
+    def class_methods_scenario(added)
+      File.write(CONCERN, <<~RUBY)
+        module ScenarioConcern
+          def class_methods(&block)
+            mod = const_defined?(:ClassMethods, false) ? const_get(:ClassMethods) : const_set(:ClassMethods, Module.new)
+            mod.module_eval(&block)
+          end
+
+          def included(base) = base.extend(const_get(:ClassMethods))
+        end
+      RUBY
+      require CONCERN
+      auditable = "module Auditable\n  extend ScenarioConcern\n\n  class_methods do\n    def audited? = true\n  end\nend\n"
+      scenario(files: { "app/base_model.rb" => "class BaseModel\n  def self.label = \"base\"\nend\n", "app/auditable.rb" => auditable,
+                        "app/card.rb" => "class Card < BaseModel\n  include Auditable\nend\n" },
+               body: -> { Card.label }, edits: { "app/auditable.rb" => auditable.sub("    def audited? = true\n", "    def audited? = true\n#{added}") })
+    end
+
+    def test_a_concerns_class_methods_gain_a_method_the_includer_inherited
+      assert_selected class_methods_scenario("    def label = \"audited\"\n")
+    end
+
     def test_a_class_with_method_missing_gains_the_real_method
       proxy = "class Proxy\n  def method_missing(name, *) = name == :size ? 1 : super\n  def respond_to_missing?(name, p = false) = name == :size || super\nend\n"
       assert_selected scenario(files: { "app/proxy.rb" => proxy }, body: -> { Proxy.new.size },
