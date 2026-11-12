@@ -109,13 +109,37 @@ module Riptide
       end
     end
 
+    # The logs hold the build's failures, so losing them would let a later
+    # build skip a test that's still failing.
+    def test_a_publish_that_fails_keeps_the_logs_for_the_next_one
+      with_remote do |_, clone|
+        root = clone.("a")
+        sha = commit_file(root, "app/widget.rb", "class Widget\nend\n", push: true)
+        store_for(root, remote: File.join(root, "nowhere.git")).tap do |store|
+          store.append_start(TEST)
+          store.append_run(run_for(sha, passed: false))
+          assert_raises(Riptide::Error) { store.publish(build: MAIN) }
+        end
+        refute_empty Dir.glob(File.join(root, "tmp/riptide/unit/log-*.jsonl"))
+
+        store_for(root).publish(build: MAIN)
+        assert_empty Dir.glob(File.join(root, "tmp/riptide/unit/log-*.jsonl")), "published, so they're done"
+        b = clone.("b")
+        fetch(b, MAIN)
+        refute_empty marks(store_for(b), TEST), "the failure stays open"
+      end
+    end
+
     def test_a_branch_with_nothing_to_publish_gets_no_unit
       with_remote do |remote, clone|
         root = clone.("a")
         commit_file(root, "README", "x\n", push: true)
-        store_for(root).publish(build: MAIN)
+        store = store_for(root)
+        store.append_set("e1", { "Gemfile.lock" => { "sha" => "g1", "whole" => true } })
+        store.publish(build: MAIN)
 
         assert_empty refs(remote)
+        assert_empty Dir.glob(File.join(root, "tmp/riptide/unit/log-*.jsonl"))
       end
     end
 

@@ -154,10 +154,16 @@ module Riptide
         harvested, pins = harvest(model, marks, files, landed, records)
         added = fold(model, marks, files, records, seen)
         trim(model, marks, files, head)
-        return Published.new(ref: runs_ref(build.key), runs: 0, harvested: 0, deleted: []) if runs.nil? && model.runs.empty? && marks.empty?
+        if runs.nil? && model.runs.empty? && marks.empty?
+          logs.each { |path| FileUtils.rm_f(path) }
+          return Published.new(ref: runs_ref(build.key), runs: 0, harvested: 0, deleted: [])
+        end
 
         pushed = push(build, model, marks, files, pins, landing, runs, stamp)
         if pushed
+          # Until the push lands, a failure leaves the logs for the next
+          # publish, since they hold the build's failures too.
+          logs.each { |path| FileUtils.rm_f(path) }
           @git.delete_refs(landed.flat_map { |key, _| [runs_ref(key), stamp_ref(key)] })
           @git.run("update-ref", runs_ref(build.key), pushed.first)
           @git.run("update-ref", stamp_ref(build.key), pushed.last)
@@ -170,7 +176,6 @@ module Riptide
       end
     ensure
       close_log
-      logs&.each { |path| FileUtils.rm_f(path) }
     end
 
     private
