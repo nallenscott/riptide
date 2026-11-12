@@ -304,8 +304,8 @@ module Riptide
         # A run whose shared set the logs lost can't be checked against anything.
         next if set_ids.include?(nil)
 
-        files, constants = Index::Model.split(record["inputs"])
-        added += 1 if model.add_run(test: test, at: record["at"], sets: set_ids, files: files, constants: constants, file: record["file"])
+        inputs, constants = Index::Model.split(record["inputs"])
+        added += 1 if model.add_run(test: test, at: record["at"], sets: set_ids, files: inputs, constants: constants, file: record["file"])
       end
       unfinished.each { |test, count| (marks[test] ||= Set.new) << SecureRandom.hex(16) if count.positive? }
       records.select { |record| record["type"] == "load" }.each { |record| model.merge_loads(record["sha"], record["lines"]) }

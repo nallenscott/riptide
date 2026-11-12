@@ -253,6 +253,29 @@ module Riptide
       end
     end
 
+    def test_a_failure_whose_file_is_gone_is_dropped_after_a_pass_in_the_same_logs
+      with_remote do |_, clone|
+        root = clone.("a")
+        sha = commit_file(root, "app/widget.rb", "x = 1\n", push: true)
+        commit_file(root, "test/old_test.rb", "old\n", push: true)
+        store = store_for(root)
+        store.append_run(run_for(sha, file: "app/widget.rb"))
+        store.append_run(run_for(sha, at: 2.0, passed: false, test: %w[OldTest test_old], file: "test/old_test.rb"))
+        store.publish(build: MAIN)
+        fetch(root, MAIN)
+        refute_empty marks(store_for(root), %w[OldTest test_old])
+
+        system("git", "-C", root, "rm", "-q", "test/old_test.rb", exception: true)
+        system("git", "-C", root, "commit", "-qm", "rm", exception: true)
+        store = store_for(root)
+        store.append_run(run_for(sha, at: 3.0, file: "app/widget.rb", methods: ["Widget#b"]))
+        store.publish(build: MAIN)
+        fetch(root, MAIN)
+
+        assert_empty marks(store_for(root), %w[OldTest test_old])
+      end
+    end
+
     def test_ids_stay_put_so_a_publish_rewrites_only_what_changed
       with_remote do |remote, clone|
         root = clone.("a")

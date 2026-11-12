@@ -18,6 +18,7 @@
 - Runs are stored in git as a sharded index, one unit per suite and branch or pull request, with `riptide fetch` and `riptide publish`
 - Tests that share a name, like specs with the same describe and it text, always run
 - Failures stay open until a later build passes the test, and a publish that fails keeps the logs for the next one
+- Deleting a test file drops its runs and open failures
 - Main and release branches harvest the pull requests that landed, found with `git merge-tree`, and delete their units, along with any idle for 30 days
 - The plugin only activates after `Riptide.configure`
 - Needs Minitest 5.26.1 or later, the first that installs on Ruby 4, and is tested on it and the newest Minitest 5 and 6
