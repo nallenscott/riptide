@@ -60,10 +60,14 @@ module Riptide
       flags = { "main" => %w[--branch main --harvest], "stable" => %w[--branch stable --harvest --upstream main] }
               .fetch(branch) { ["--pr", PRS.fetch(branch), "--target", base] }
       sh(dir, "ruby", EXE, "fetch", *flags)
+      # A run with riptide off writes no plan, so an old one can't stand in.
+      plan = File.join(dir, "tmp/plan.json")
+      FileUtils.rm_f(plan)
       # A failing test still publishes, the way CI does.
       @output, = Open3.capture2e({ "RIPTIDE_MODE" => mode }, "ruby", "-I", LIB, "test/suite_test.rb", chdir: dir)
+      assert File.exist?(plan), "riptide wrote no plan:\n#{@output}"
       @published = sh(dir, "ruby", EXE, "publish", "--suite", "unit", *flags)
-      @reasons = JSON.parse(File.read(File.join(dir, "tmp/plan.json")))["selected"].map { |entry| "#{entry["test"][1]}: #{entry["reason"]}" }
+      @reasons = JSON.parse(File.read(plan))["selected"].map { |entry| "#{entry["test"][1]}: #{entry["reason"]}" }
       @reasons.map { |reason| reason.split(":").first }.sort
     end
 
