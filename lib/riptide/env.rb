@@ -4,11 +4,11 @@ require "digest"
 require "json"
 
 module Riptide
-  # What every test in a process depends on: fallback files as a whole, the
-  # code that ran at boot, files read at boot, and listings of the globs
-  # that catch new files. A new initializer, or a new support file a boot
-  # glob requires, can change every test without touching any file a run
-  # recorded.
+  # What every later test in a process depends on: fallback files as a
+  # whole, and the code, file reads, tables and listings outside every test
+  # and test class, from boot on, like a parallel worker's setup. A new
+  # initializer, or a new support file a boot glob requires, can change
+  # every test without touching any file a run recorded.
   module Env
     GLOB = "glob:"
     # A constant a test looked up by name and didn't find, as
@@ -20,16 +20,17 @@ module Riptide
     module_function
 
     # { path => facets }, stored as one of the process's shared sets.
-    def capture(inputs:, layout:, fallback_patterns:, locale_patterns:, boot_lines:, boot_reads:, boot_globs:)
+    # +trace+ and +window+ are what the process's windows gathered.
+    def capture(inputs:, layout:, fallback_patterns:, locale_patterns:, trace:, window:)
       files = {}
-      (fallback_patterns + locale_patterns + boot_globs.to_a).uniq.each do |pattern|
+      (fallback_patterns + locale_patterns + window.listings.to_a).uniq.each do |pattern|
         files["#{GLOB}#{pattern}"] = { "sha" => inputs.listing(pattern) }
       end
       fallback_patterns.flat_map { |pattern| Dir.glob(pattern, base: layout.root) }.uniq.each do |path|
         files[path] = { "sha" => inputs.sha(path), "whole" => true } if inputs.recordable?(path) && File.file?(File.join(layout.root, path))
       end
-      inputs.for_boot(boot_lines).each { |path, facets| files[path] ||= facets }
-      boot_reads.each do |path|
+      inputs.for_process(trace.lines, window.tables).each { |path, facets| files[path] ||= facets }
+      (window.reads.to_a + Tracer.preloaded).each do |path|
         files[path] = { "sha" => inputs.sha(path), "whole" => true } if !files.key?(path) && inputs.recordable?(path)
       end
       files.sort.to_h

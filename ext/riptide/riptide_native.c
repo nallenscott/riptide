@@ -1,15 +1,16 @@
 // Riptide::Tracer. Probes sit on the VM's own trace instructions in the app's
 // code and nowhere else, each instruction sequence with a hook list of its
 // own, so Rails and gems run untraced and YJIT keeps its compiled code. A line
-// probe turns itself off after its first hit and comes back when the next
-// test starts, so a test pays once per distinct line it runs, however hot the
+// probe turns itself off after its first hit and comes back when a window
+// opens or closes, so a test pays once per distinct line it runs, however hot the
 // line is. Method, block and class entries and class ends stay armed: they
 // record receivers and load facts, and they're where YJIT would otherwise
 // jump into app code that a probe coming back later can't reach.
 //
-// Every in-scope line, method entry and block entry goes to the open test
-// window, or to load facts while its thread is inside a class body, or else
-// to boot lines.
+// Every in-scope line, method entry and block entry goes to load facts while
+// its thread is inside a class body, or else to the innermost open window: a
+// test's, a test class's, or the process's, which is always open and is all
+// there is at boot.
 //
 // Hooks this close to the VM need Ruby's internal headers, which the build
 // gets from Ruby's source. On a Ruby without them the tracer says so and
@@ -33,13 +34,13 @@ static VALUE mTracer;
 static VALUE stacks = Qnil;        // thread => [class, frame depth, ...] being defined
 static long loading = 0;           // classes being defined, summed over threads
 
-static VALUE window = Qnil;        // relative path => byte map String, or nil
-static VALUE receivers = Qnil;     // class => true for each receiver of an in-scope method in the window
+static VALUE window = Qnil;        // relative path => byte map String, for the innermost window
+static VALUE receivers = Qnil;     // class => true for each receiver of an in-scope method in it, nil in the process's
+static VALUE enclosing = Qnil;     // [[window, receivers], ...] for the windows around it, the process's first
 static VALUE last_receiver = Qnil;
 static VALUE load_facts = Qnil;    // relative path => { line => Array of classes }
 static VALUE load_called = Qnil;   // relative path => { line => true } for called code
 static VALUE owner_files = Qnil;   // class => { relative path => true }
-static VALUE boot_lines = Qnil;    // relative path => { line => true }
 
 static VALUE last_relative = Qnil;
 static VALUE last_map = Qnil;
@@ -289,24 +290,18 @@ hook(VALUE data, rb_trace_arg_t *arg)
         }
     }
 
-    if (!NIL_P(window)) {
-        record_window(probes->relative, line);
-        if (event == RUBY_EVENT_CALL) {
-            // A method that comes in later anywhere in the receiver's
-            // ancestry can take this call over, so the receiver's class
-            // counts, not just where the method lives.
-            // A class method's receiver is the class itself, whose
-            // singleton ancestry riptide expands later.
-            VALUE self = arg->self;
-            VALUE klass = RB_TYPE_P(self, T_CLASS) || RB_TYPE_P(self, T_MODULE) ? self : rb_obj_class(self);
-            if (klass != last_receiver) {
-                last_receiver = klass;
-                rb_hash_aset(receivers, klass, Qtrue);
-            }
+    record_window(probes->relative, line);
+    // A method that comes in later anywhere in the receiver's ancestry can
+    // take this call over, so the receiver's class counts, not just where the
+    // method lives. A class method's receiver is the class itself, whose
+    // singleton ancestry riptide expands later.
+    if (event == RUBY_EVENT_CALL && !NIL_P(receivers)) {
+        VALUE self = arg->self;
+        VALUE klass = RB_TYPE_P(self, T_CLASS) || RB_TYPE_P(self, T_MODULE) ? self : rb_obj_class(self);
+        if (klass != last_receiver) {
+            last_receiver = klass;
+            rb_hash_aset(receivers, klass, Qtrue);
         }
-    }
-    else {
-        nested_set(boot_lines, probes->relative, lineno);
     }
 
     // A global hook on this pc, like coverage or a debugger, needs it traced.
@@ -537,18 +532,24 @@ tracer_installed_p(VALUE self)
     return installed ? Qtrue : Qfalse;
 }
 
+static void
+forget_last(void)
+{
+    last_relative = Qnil;
+    last_map = Qnil;
+    last_receiver = Qnil;
+}
+
+// A window inside the innermost one, which lines go to until it closes.
 static VALUE
 tracer_open_window(VALUE self)
 {
     (void)self;
-    if (!NIL_P(window)) rb_raise(rb_eRuntimeError, "a Riptide::Tracer window is already open");
-
     rearm();
+    rb_ary_push(enclosing, rb_assoc_new(window, receivers));
     window = rb_hash_new();
     receivers = identity_hash();
-    last_relative = Qnil;
-    last_map = Qnil;
-    last_receiver = Qnil;
+    forget_last();
     return Qnil;
 }
 
@@ -565,21 +566,40 @@ collect_lines(VALUE relative, VALUE map, VALUE result)
     return ST_CONTINUE;
 }
 
+// [{ relative path => [line, ...] }, [receiver class, ...]] for the
+// innermost window.
+static VALUE
+contents(void)
+{
+    VALUE lines = rb_hash_new();
+    rb_hash_foreach(window, collect_lines, lines);
+    return rb_assoc_new(lines, NIL_P(receivers) ? rb_ary_new() : rb_funcall(receivers, rb_intern("keys"), 0));
+}
+
 static VALUE
 tracer_close_window(VALUE self)
 {
     (void)self;
-    if (NIL_P(window)) rb_raise(rb_eRuntimeError, "no Riptide::Tracer window is open");
+    if (RARRAY_LEN(enclosing) == 0) rb_raise(rb_eRuntimeError, "no Riptide::Tracer window is open");
 
     rearm();
-    VALUE lines = rb_hash_new();
-    rb_hash_foreach(window, collect_lines, lines);
-    VALUE result = rb_assoc_new(lines, rb_funcall(receivers, rb_intern("keys"), 0));
-    window = Qnil;
-    receivers = Qnil;
-    last_relative = Qnil;
-    last_map = Qnil;
-    last_receiver = Qnil;
+    VALUE result = contents();
+    VALUE around = rb_ary_pop(enclosing);
+    window = RARRAY_AREF(around, 0);
+    receivers = RARRAY_AREF(around, 1);
+    forget_last();
+    return result;
+}
+
+// What the innermost window has seen since it opened or was last drained.
+static VALUE
+tracer_drain(VALUE self)
+{
+    (void)self;
+    VALUE result = contents();
+    window = rb_hash_new();
+    if (!NIL_P(receivers)) receivers = identity_hash();
+    forget_last();
     return result;
 }
 
@@ -606,13 +626,6 @@ tracer_drain_load_called(VALUE self)
 }
 
 static VALUE
-tracer_drain_boot_lines(VALUE self)
-{
-    (void)self;
-    return drain(&boot_lines);
-}
-
-static VALUE
 tracer_owner_files(VALUE self)
 {
     (void)self;
@@ -629,7 +642,8 @@ Init_riptide_native(void)
     load_facts = rb_hash_new();
     load_called = rb_hash_new();
     owner_files = identity_hash();
-    boot_lines = rb_hash_new();
+    window = rb_hash_new();
+    enclosing = rb_ary_new();
 
     rb_gc_register_address(&stacks);
     rb_gc_register_address(&window);
@@ -638,7 +652,7 @@ Init_riptide_native(void)
     rb_gc_register_address(&load_facts);
     rb_gc_register_address(&load_called);
     rb_gc_register_address(&owner_files);
-    rb_gc_register_address(&boot_lines);
+    rb_gc_register_address(&enclosing);
     rb_gc_register_address(&last_relative);
     rb_gc_register_address(&last_map);
     rb_gc_register_address(&last_pinned);
@@ -651,7 +665,7 @@ Init_riptide_native(void)
     rb_define_singleton_method(mTracer, "_close_window", tracer_close_window, 0);
     rb_define_singleton_method(mTracer, "_drain_load_facts", tracer_drain_load_facts, 0);
     rb_define_singleton_method(mTracer, "_drain_load_called", tracer_drain_load_called, 0);
-    rb_define_singleton_method(mTracer, "drain_boot_lines", tracer_drain_boot_lines, 0);
+    rb_define_singleton_method(mTracer, "_drain", tracer_drain, 0);
     rb_define_singleton_method(mTracer, "_owner_files", tracer_owner_files, 0);
 }
 

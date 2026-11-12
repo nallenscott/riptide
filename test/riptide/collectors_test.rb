@@ -74,10 +74,12 @@ module Riptide
 
     # Only the app's own listings count, like test_helper globbing its
     # support files. Gems like Zeitwerk list every autoload directory.
-    def test_reads_and_listings_before_frameworks_install_are_boot_reads
+    def test_reads_and_listings_outside_every_window_are_the_processs
       path = File.join(TRACE_ROOT, "boot/settings.yml")
+      later = File.join(TRACE_ROOT, "boot/worker.yml")
       FileUtils.mkdir_p(File.dirname(path))
       File.write(path, "a: 1")
+      File.write(later, "b: 2")
       Collectors.install(TRACE_ROOT)
       File.new(path).close
       load_traced("boot/loader.rb", <<~RUBY)
@@ -87,10 +89,31 @@ module Riptide
       RUBY
       Dir[File.join(TRACE_ROOT, "gem/**/*.rb")]
 
-      assert_includes Collectors.boot_reads, "boot/settings.yml"
-      assert_equal ["boot/**/*.rb", "boot/plugins/*", "support/*.rb"], Collectors.boot_globs.to_a.sort, "a gem's listings aren't the app's"
       Collectors.install_frameworks
-      assert_nil Collectors.boot_reads
+      File.read(later)
+
+      process = Collectors.drain
+      assert_equal ["boot/settings.yml", "boot/worker.yml"], process.reads.to_a.sort, "a read after boot, like a worker's setup, counts too"
+      assert_equal ["boot/**/*.rb", "boot/plugins/*", "support/*.rb"], process.listings.to_a.sort, "a gem's listings aren't the app's"
+      assert_empty Collectors.drain.reads
+    end
+
+    def test_windows_nest_and_each_keeps_what_ran_while_it_was_innermost
+      FileUtils.mkdir_p(File.join(TRACE_ROOT, "nested"))
+      %w[a b c].each { |name| File.write(File.join(TRACE_ROOT, "nested/#{name}.yml"), name) }
+      Collectors.install(TRACE_ROOT)
+      outer = Collectors.open
+      File.read(File.join(TRACE_ROOT, "nested/a.yml"))
+      inner = Collectors.open
+      File.read(File.join(TRACE_ROOT, "nested/b.yml"))
+      assert_same inner, Collectors.close
+      File.read(File.join(TRACE_ROOT, "nested/c.yml"))
+
+      assert_same outer, Collectors.close
+      assert_equal ["nested/a.yml", "nested/c.yml"], outer.reads.to_a.sort
+      assert_equal ["nested/b.yml"], inner.reads.to_a
+      assert_nil Collectors.current
+      assert_empty Collectors.drain.reads
     end
 
     def test_a_translation_marks_the_window

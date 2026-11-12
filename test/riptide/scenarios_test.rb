@@ -59,7 +59,7 @@ module Riptide
 
     def run_scenario(files:, edits:, body: nil, test_source: nil, fallback: {}, boot: nil, reload: nil, before_record: nil)
       Collectors.install(TRACE_ROOT)
-      Tracer.drain_boot_lines
+      Tracer.drain
       Tracer.drain_load_facts
       files.merge(fallback).each { |path, source| write(path, source) }
       commit_all
@@ -68,14 +68,17 @@ module Riptide
         load write("test/scenario_test.rb", "SCENARIO_BODY = -> do\n  #{test_source}\nend\n")
         body = Object.const_get(:SCENARIO_BODY)
       end
+      boot = [Tracer.drain, Collectors.drain]
       layout = Layout.new(root: TRACE_ROOT)
       inputs = Inputs.new(layout: layout, files: Git.new(TRACE_ROOT).files)
       store = Store.new(root: TRACE_ROOT, suite: "scenario", log_dir: Dir.mktmpdir)
-      env = Env.capture(inputs: inputs, layout: layout, fallback_patterns: fallback.empty? ? [] : ["config/initializers/**/*"], locale_patterns: [],
-                        boot_lines: Tracer.drain_boot_lines, boot_reads: Collectors.boot_reads.to_a, boot_globs: Collectors.boot_globs.to_a)
-      store.append_set(Store.set_id(env), env)
-      recorder = Recorder.new(store: store, inputs: inputs, env_set: Store.set_id(env))
+      fallback_patterns = fallback.empty? ? [] : ["config/initializers/**/*"]
+      process = lambda do |trace, window|
+        Env.capture(inputs: inputs, layout: layout, fallback_patterns: fallback_patterns, locale_patterns: [], trace: trace, window: window)
+      end
+      recorder = Recorder.new(store: store, inputs: inputs, process: process)
       recorder.absorb_load_facts
+      recorder.start(*boot)
       before_record&.call(self)
       before = nil
       recorder.record(FakeTest.new("test_it")) { before = body.call; FakeResult.new(true) }

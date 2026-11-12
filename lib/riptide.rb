@@ -26,6 +26,7 @@ require_relative "riptide/store"
 require_relative "riptide/harvest"
 require_relative "riptide/selector"
 require_relative "riptide/runner"
+require_relative "riptide/scope"
 require_relative "riptide/recorder"
 require_relative "riptide/session"
 

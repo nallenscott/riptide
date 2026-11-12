@@ -30,6 +30,9 @@ module Riptide
       end
     RUBY
 
+    # The process's set, whatever ran outside the tests.
+    PROCESS = ->(*) { { "config/boot.rb" => { "sha" => "boot", "whole" => true } } }
+
     # Loaded once, so the classes aren't redefined for every test.
     def self.fixtures
       @fixtures ||= Object.new.extend(TracedFixture).then do |loader|
@@ -37,12 +40,16 @@ module Riptide
       end
     end
 
+    def self.scoped
+      @scoped ||= Object.new.extend(TracedFixture).load_traced("recorder/scoped.rb", SCOPED)
+    end
+
     def setup
       @concern, @model = self.class.fixtures
       @dir = Dir.mktmpdir
       @store = Store.new(root: TRACE_ROOT, suite: "unit", log_dir: @dir)
       @inputs = Inputs.new(layout: Layout.new(root: TRACE_ROOT), files: Git.new(TRACE_ROOT).files)
-      @recorder = Recorder.new(store: @store, inputs: @inputs, env_set: "env1")
+      @recorder = Recorder.new(store: @store, inputs: @inputs, process: PROCESS)
       @recorder.absorb_load_facts
     end
 
@@ -78,7 +85,7 @@ module Riptide
       assert_equal %w[RecorderCard#go RecorderCard.prepare], card["methods"].sort
       assert_includes card["constants"], "RecorderCard::LIMIT"
       assert run.passed
-      assert_equal "env1", run.sets.first
+      assert_equal Store.set_id(PROCESS.call), run.sets.first
       concern = run.sets.drop(1).map { |id| logged_set(id) }.find { |files| files.key?(@concern) }
       assert_includes concern.fetch(@concern)["owners"], "RecorderCard"
       refute run.inputs.key?(@concern), "what a class's loading ran lives in its shared set, not the run"
@@ -156,12 +163,173 @@ module Riptide
       refute_nil recorded.first.inputs
     end
 
+    SCOPED = <<~RUBY
+      module RecorderScoped
+        def self.worker = :worker
+        def self.entry = :entry
+        def self.before = :before
+        def self.during = :during
+        def self.after = :after
+      end
+
+      class RecorderScopedThing
+        def ping = :ping
+      end
+
+      class RecorderScopedOther < RecorderScopedThing
+      end
+    RUBY
+
+    # A test class that sets up around its tests the ways suites do: an
+    # override of how Minitest runs the class, and a before_all and
+    # after_all around with_info_handler, the way minitest-hooks does it.
+    def scoped_class
+      entry = Minitest::Runnable.respond_to?(:run_suite) ? :run_suite : :run
+      Class.new(Minitest::Test) do
+        def self.name = "RecorderScopedTest"
+        def self.runnable_methods = %w[test_a test_b]
+        define_singleton_method(entry) do |*args, **options, &block|
+          RecorderScoped.entry
+          super(*args, **options, &block)
+        end
+        def self.with_info_handler(*)
+          RecorderScoped.before
+          super.tap { RecorderScoped.after }
+        end
+        def test_a = Dir.glob("recorder/*.rb", base: TRACE_ROOT).then { RecorderScoped.during }
+        def test_b = RecorderScoped.during
+      end
+    end
+
+    def plain_class
+      Class.new(Minitest::Test) do
+        def self.name = "RecorderPlainTest"
+        def test_c = RecorderScoped.during
+      end
+    end
+
+    # Every method a run depends on, across its own inputs and its sets.
+    def methods_of(test)
+      run = recorded(test).first
+      [run.inputs, *run.sets.map { |id| logged_set(id) }].compact.flat_map { |files| files.values.flat_map { |facets| facets["methods"] || [] } }
+    end
+
+    def scoped_recorder
+      self.class.scoped
+      Collectors.install(TRACE_ROOT)
+      inputs = Inputs.new(layout: Layout.new(root: TRACE_ROOT), files: Git.new(TRACE_ROOT).files)
+      Recorder.new(store: @store, inputs: inputs, process: ->(trace, window) { inputs.for_process(trace.lines, window.tables) })
+    end
+
+    def installed(recorder)
+      Recorder.install(recorder)
+      yield
+    ensure
+      Recorder.instance_variable_set(:@current, nil)
+    end
+
+    def run_class(klass)
+      reporter = Minitest::CompositeReporter.new(Minitest::StatisticsReporter.new(StringIO.new))
+      Minitest::Runnable.respond_to?(:run_suite) ? klass.run_suite(reporter, {}) : klass.run(reporter, {})
+    end
+
+    def test_a_test_depends_on_its_class_setup_and_not_its_teardown
+      recorder = scoped_recorder
+      scoped = scoped_class
+      plain = plain_class
+      installed(recorder) do
+        run_class(scoped)
+        run_class(plain)
+      end
+
+      %w[test_a test_b].each do |name|
+        methods = methods_of(["RecorderScopedTest", name])
+        assert_includes methods, "RecorderScoped.entry", "setup in the class's own run counts for #{name}"
+        assert_includes methods, "RecorderScoped.before", "a before_all counts for #{name}"
+        assert_includes methods, "RecorderScoped.during"
+        refute_includes methods, "RecorderScoped.after", "an after_all runs after every test"
+      end
+      class_set = recorded(%w[RecorderScopedTest test_a]).first.sets.map { |id| logged_set(id) }.find { |files| files.dig("recorder/scoped.rb", "methods")&.include?("RecorderScoped.entry") }
+      assert_includes class_set.dig("recorder/scoped.rb", "methods"), "RecorderScoped.before", "one scope for the class, however many of its hooks it went through"
+      refute recorded(%w[RecorderPlainTest test_c]).first.sets.drop(1).map { |id| logged_set(id) }.any?(&:empty?), "a class that set nothing up adds no set"
+      later = methods_of(%w[RecorderPlainTest test_c])
+      assert_includes later, "RecorderScoped.during"
+      refute_includes later, "RecorderScoped.entry", "another class's setup isn't this one's"
+      refute_includes later, "RecorderScoped.before", "another class's before_all isn't this one's"
+      assert recorded(%w[RecorderScopedTest test_a]).first.inputs.key?("glob:recorder/*.rb")
+      sets = recorded(%w[RecorderScopedTest test_b]).first.sets.map { |id| logged_set(id) }
+      refute sets.any? { |files| files.key?("glob:recorder/*.rb") }, "riptide listing the glob to record test_a isn't the class's"
+    end
+
+    # The way a Rails parallel worker runs each test it's given. Its
+    # parallelize_setup runs outside any class, before the jobs.
+    def test_worker_jobs_get_their_class_scope_and_setup_that_ran_before_them
+      recorder = scoped_recorder
+      job = ->(klass, name) { klass.with_info_handler(nil) { Minitest.respond_to?(:run_one_method) ? Minitest.run_one_method(klass, name) : klass.new(name).run } }
+      scoped = scoped_class
+      plain = plain_class
+      installed(recorder) do
+        job.call(scoped, "test_a")
+        RecorderScoped.worker
+        job.call(scoped, "test_b")
+        job.call(plain, "test_c")
+      end
+
+      first = methods_of(%w[RecorderScopedTest test_a])
+      refute_includes first, "RecorderScoped.worker", "it ran after test_a"
+      assert_includes methods_of(%w[RecorderScopedTest test_b]), "RecorderScoped.worker", "code outside every class counts for later tests"
+      assert_includes first, "RecorderScoped.before"
+      refute_includes first, "RecorderScoped.entry", "the job never ran the class's own run"
+      refute_includes methods_of(%w[RecorderPlainTest test_c]), "RecorderScoped.before", "another class's job isn't this one's"
+    end
+
+    # Runs test_a and test_b in one class scope, with +between+ in between,
+    # and returns the sets each one got.
+    def sets_around(recorder)
+      klass = scoped_class
+      first = klass.new("test_a")
+      second = klass.new("test_b")
+      recorder.scope(klass) do
+        RecorderScopedThing.new.ping
+        recorder.record(first) { first.run }
+        yield
+        recorder.record(second) { second.run }
+      end
+      %w[test_a test_b].map { |name| recorded(["RecorderScopedTest", name]).first.sets.map { |id| logged_set(id) } }
+    end
+
+    def test_a_file_read_between_tests_counts_for_the_next_one
+      data = File.join(TRACE_ROOT, "recorder/scoped.yml")
+      File.write(data, "a: 1")
+      before, after = sets_around(scoped_recorder) { File.read(data) }
+
+      refute before.any? { |files| files.key?("recorder/scoped.yml") }
+      assert after.any? { |files| files.dig("recorder/scoped.yml", "whole") }
+    end
+
+    # The same line on another receiver runs nothing new, but its class's
+    # set comes with it.
+    def test_a_receiver_between_tests_counts_for_the_next_one
+      before, after = sets_around(scoped_recorder) { RecorderScopedOther.new.ping }
+
+      assert_equal before.size + 1, after.size
+    end
+
+    def test_a_class_scope_doesnt_open_inside_a_test
+      recorder = scoped_recorder
+      klass = scoped_class
+      test = fixture_test { klass.with_info_handler(nil) { RecorderScoped.during } }
+      installed(recorder) { recorder.record(test) { test.run } }
+
+      assert_includes methods_of(%w[RecorderCardTest test_go]), "RecorderScoped.before", "it's the test's own code"
+    end
+
     def test_a_file_git_ignores_is_never_recorded
       File.write(File.join(TRACE_ROOT, ".gitignore"), "*.key\n")
       key = File.join(TRACE_ROOT, "recorder/master.key")
       File.write(key, "SECRET")
       inputs = Inputs.new(layout: Layout.new(root: TRACE_ROOT), files: Git.new(TRACE_ROOT).files)
-      recorder = Recorder.new(store: @store, inputs: inputs, env_set: "env1")
+      recorder = Recorder.new(store: @store, inputs: inputs, process: PROCESS)
       test = fixture_test { File.read(key) }
       recorder.record(test) { test.run }
 
@@ -176,7 +344,7 @@ module Riptide
       Tracer.drain_load_facts
       File.write(File.join(TRACE_ROOT, path), "class RecorderStale\n  def self.go = 22\nend\n")
       inputs = Inputs.new(layout: Layout.new(root: TRACE_ROOT), files: Git.new(TRACE_ROOT).files)
-      recorder = Recorder.new(store: @store, inputs: inputs, env_set: "env1")
+      recorder = Recorder.new(store: @store, inputs: inputs, process: PROCESS)
       test = fixture_test { RecorderStale.go }
 
       _, err = capture_io { recorder.record(test) { test.run } }
@@ -190,7 +358,7 @@ module Riptide
       def broken.append_run(*) = raise("disk full")
       def broken.append_load_facts(*) = nil
       def broken.append_set(*) = nil
-      recorder = Recorder.new(store: broken, inputs: @inputs, env_set: "env1")
+      recorder = Recorder.new(store: broken, inputs: @inputs, process: PROCESS)
       test = fixture_test { assert true }
 
       result = nil

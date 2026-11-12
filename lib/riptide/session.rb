@@ -18,22 +18,25 @@ module Riptide
     def start
       Tracer.watch_coverage
       raise Error, Tracer.broken if Tracer.broken
-      boot_reads = Collectors.boot_reads.to_a + Tracer.preloaded
-      boot_globs = Collectors.boot_globs.to_a
-      Collectors.install_frameworks
-      git = Git.new(@root)
-      layout = Layout.new(root: @root, schema_path: @config.schema_path, fixtures_path: @config.fixtures_path)
-      store = Store.new(root: @root, suite: @config.suite, log_dir: @config.log_dir, retained_runs: @config.retained_runs)
-      inputs = Inputs.new(layout: layout, files: git.files, source_patterns: @config.source_patterns, locale_patterns: @config.locale_patterns)
-      env = Env.capture(inputs: inputs, layout: layout, fallback_patterns: @config.fallback_patterns, locale_patterns: @config.locale_patterns,
-                        boot_lines: Tracer.drain_boot_lines, boot_reads: boot_reads, boot_globs: boot_globs)
-      tests = Riptide.discovered_tests
 
-      recorder = Recorder.new(store: store, inputs: inputs, env_set: Store.set_id(env))
-      recorder.absorb_load_facts
-      store.append_set(Store.set_id(env), env)
-      Recorder.install(recorder)
-      select(store, layout, inputs, tests) unless @config.mode == :record
+      boot = [Tracer.drain, Collectors.drain]
+      Recorder.aside do
+        Collectors.install_frameworks
+        git = Git.new(@root)
+        layout = Layout.new(root: @root, schema_path: @config.schema_path, fixtures_path: @config.fixtures_path)
+        store = Store.new(root: @root, suite: @config.suite, log_dir: @config.log_dir, retained_runs: @config.retained_runs)
+        inputs = Inputs.new(layout: layout, files: git.files, source_patterns: @config.source_patterns, locale_patterns: @config.locale_patterns)
+        process = lambda do |trace, window|
+          Env.capture(inputs: inputs, layout: layout, fallback_patterns: @config.fallback_patterns, locale_patterns: @config.locale_patterns, trace: trace, window: window)
+        end
+        tests = Riptide.discovered_tests
+
+        recorder = Recorder.new(store: store, inputs: inputs, process: process)
+        recorder.absorb_load_facts
+        recorder.start(*boot)
+        Recorder.install(recorder)
+        select(store, layout, inputs, tests) unless @config.mode == :record
+      end
     rescue StandardError => e
       warn "[riptide] #{@config.suite}: off for this run, #{e.class}: #{e.message}"
     end

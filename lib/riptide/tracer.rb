@@ -96,10 +96,22 @@ module Riptide
       # depends on them whole.
       def preloaded = @preloaded || []
 
-      # What ran since the window opened: { path => [line, ...] }, and the
-      # classes of the receivers of every in-scope method called.
+      # Windows nest, and lines go to the innermost one. The process's is
+      # always open, so code that runs outside every other window, boot
+      # included, lands there. It keeps no receivers.
+      #
+      # What ran in the innermost window since it opened, as { path =>
+      # [line, ...] } and the classes of the receivers of every in-scope
+      # method called.
       def close_window
         lines, receivers = _close_window
+        Trace.new(lines, receivers)
+      end
+
+      # What ran in the innermost window since it opened or was last drained,
+      # leaving it open.
+      def drain
+        lines, receivers = _drain
         Trace.new(lines, receivers)
       end
 

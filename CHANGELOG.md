@@ -6,6 +6,7 @@
 - Changes are analyzed by what changed: methods and blocks as a whole, constants, declarations, tables and whole files
 - Reordering methods selects nothing unless one moves past a class-level line like `private`
 - Every git call runs under a deadline, including the blob reader and the diffs
+- Tests depend on what ran before them outside any test: boot, a parallel worker's setup, and their own class's setup, like a `before_all`, but not its `after_all`
 - Tests depend on the classes they called methods on, looked up by name, or read constants from, plus the directories they listed and the files they checked for
 - Only files git knows about are recorded, and only versions from the checked-out commit are pushed
 - Runs are stored in git as a sharded index, one unit per suite and branch or pull request, with `riptide fetch` and `riptide publish`

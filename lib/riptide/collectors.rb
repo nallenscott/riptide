@@ -3,25 +3,65 @@
 require "set"
 
 module Riptide
-  # What a test touched besides the code it ran, gathered while its window
-  # is open. File reads and directory listings are watched from the moment
-  # riptide starts, so boot counts too: an initializer loading a YAML file,
-  # or `Dir["test/support/**/*.rb"].each { require it }` picking up a new
-  # file.
+  # What a test touched besides the code it ran, gathered in windows that
+  # nest the way the tracer's do: a test's, a test class's, and the
+  # process's, which is always open. The process's keeps file reads,
+  # listings and tables, from the moment riptide starts, so boot counts too:
+  # an initializer loading a YAML file, or `Dir["test/support/**/*.rb"].each
+  # { require it }` picking up a new file.
   module Collectors
     IDENTIFIER = /(?:"?\w+"?\.)?"?(\w+)"?/
     TABLE = /\b(?:JOIN|UPDATE|INTO|TRUNCATE(?:\s+TABLE)?)\s+(?:ONLY\s+)?#{IDENTIFIER}/i
     FROM_LIST = /\bFROM\s+((?:#{IDENTIFIER}(?:\s+(?:AS\s+)?"?\w+"?)?\s*,\s*)*#{IDENTIFIER})/i
 
-    Window = Struct.new(:classes, :tables, :reads, :listings, :absent, :translated, keyword_init: true)
+    # What a window gathers into, besides whether it translated anything.
+    GATHERED = %i[classes tables reads listings absent].freeze
+
+    Window = Struct.new(:classes, :tables, :reads, :listings, :absent, :translated, keyword_init: true) do
+      def self.blank = new(classes: Set.new.compare_by_identity, tables: Set.new, reads: Set.new, listings: Set.new, absent: Set.new, translated: false)
+
+      def gathered? = translated || GATHERED.any? { |field| !self[field].empty? }
+
+      # Takes in what +other+ gathered, and says whether that added anything.
+      def absorb(other)
+        grew = other.translated && !translated
+        self.translated ||= other.translated
+        GATHERED.each do |field|
+          mine = self[field]
+          size = mine.size
+          mine.merge(other[field])
+          grew ||= mine.size != size
+        end
+        grew
+      end
+    end
+
+    # What a drain gives back when nothing was gathered, which is most of
+    # the time.
+    NOTHING = Window.blank.tap { |window| GATHERED.each { |field| window[field].freeze } }.freeze
+
+    @process = Window.blank
+    @enclosing = []
 
     class << self
-      attr_reader :current, :boot_reads, :boot_globs
+      # The innermost window inside the process's, or nil, which it also is
+      # while riptide's own work runs.
+      def current = (@current unless @aside)
+
+      # Riptide's own file reads, listings and lookups aren't the app's, so
+      # nothing gathers them.
+      def aside
+        was = @aside
+        @aside = true
+        yield
+      ensure
+        @aside = was
+      end
 
       def install(root)
         @root_prefix = "#{File.expand_path(root)}/"
-        @boot_reads = Set.new
-        @boot_globs = Set.new
+        @process = Window.blank
+        @enclosing = []
         IO.singleton_class.prepend(Reads) unless IO.singleton_class < Reads
         File.singleton_class.prepend(Opens) unless File.singleton_class < Opens
         File.singleton_class.prepend(Checks) unless File.singleton_class < Checks
@@ -33,21 +73,35 @@ module Riptide
       def install_frameworks
         if defined?(::ActiveRecord::Base) && !(::ActiveRecord::Base < Instantiations)
           ::ActiveRecord::Base.prepend(Instantiations)
-          ::ActiveSupport::Notifications.subscribe("sql.active_record") { |*, payload| @current&.tables&.merge(tables_in(payload[:sql])) }
+          ::ActiveSupport::Notifications.subscribe("sql.active_record") { |*, payload| (current || process)&.tables&.merge(tables_in(payload[:sql])) }
         end
         ::I18n.singleton_class.prepend(Translations) if defined?(::I18n) && !(::I18n.singleton_class < Translations)
-        @boot_reads = nil
-        @boot_globs = nil
       end
 
       def open
-        @current = Window.new(classes: Set.new.compare_by_identity, tables: Set.new, reads: Set.new, listings: Set.new, absent: Set.new, translated: false)
+        @enclosing << @current if @current
+        @current = Window.blank
       end
 
       def close
-        window = @current
-        @current = nil
-        window
+        closed = @current
+        @current = @enclosing.pop
+        closed
+      end
+
+      # What the innermost window gathered since it opened or was last
+      # drained, leaving it open.
+      def drain
+        return NOTHING unless (@current || @process).gathered?
+
+        if @current
+          drained = @current
+          @current = Window.blank
+        else
+          drained = @process
+          @process = Window.blank
+        end
+        drained
       end
 
       # Every table a statement names, schema-qualified or not, including
@@ -61,7 +115,7 @@ module Riptide
       end
 
       def read(path)
-        target = @current&.reads || @boot_reads
+        target = (current || process)&.reads
         return unless target && @root_prefix
 
         full = File.expand_path(path.to_s)
@@ -69,11 +123,11 @@ module Riptide
       end
 
       # A glob or listing under the root, so a file showing up there counts.
-      # At boot only the app's own count: gems like Zeitwerk list every
-      # autoload directory, and a new file there changes nothing until
-      # something references it.
+      # Outside a test or class only the app's own count: gems like Zeitwerk
+      # list every autoload directory at boot, and a new file there changes
+      # nothing until something references it.
       def listed(patterns, base, depth: 2)
-        target = @current&.listings || (@boot_globs if @boot_globs && caller_locations(depth, 1).first&.path&.start_with?(@root_prefix.to_s))
+        target = current&.listings || (process.listings if process && caller_locations(depth, 1).first&.path&.start_with?(@root_prefix.to_s))
         return unless target && @root_prefix
 
         Array(patterns).flatten.each do |pattern|
@@ -88,17 +142,19 @@ module Riptide
       # gem's `const_get`, is one the test used. A name that wasn't there
       # matters too: a file defining it later changes what the test does.
       def found(value)
-        @current.classes << value if @current && value.is_a?(Module)
+        current.classes << value if current && value.is_a?(Module)
       end
 
       # Kept as the exact call, since `Card.const_defined?(:Config)` and
       # `Object.const_defined?("Card::Config")` answer differently when a
       # top-level Config exists.
       def missing(scope, name, inherit)
-        return unless @current && scope.name && (name.is_a?(String) || name.is_a?(Symbol))
+        return unless current && scope.name && (name.is_a?(String) || name.is_a?(Symbol))
 
-        @current.absent << [scope.name, name.to_s, inherit ? true : false]
+        current.absent << [scope.name, name.to_s, inherit ? true : false]
       end
+
+      def process = (@process unless @aside)
 
       # Whether a file exists is a listing of just that path.
       def checked(path)

@@ -23,7 +23,7 @@ Every recorded run names the exact file versions it depended on, and riptide com
 - **The database:** the tables its SQL touched.
 - **Files:** the files it read, the directories it listed, the files it checked for, and the locale files if it translated anything.
 - **Names:** the classes it looked up by name, and the names it looked up that weren't there.
-- **Shared setup:** what every test in the process shares. That's the code that ran at boot, the files boot read, and the files in any directory boot listed, like `Dir["test/support/**/*.rb"]`.
+- **Setup around it:** everything that ran before it outside any test, in its own test class or outside every class. That's the code that ran at boot, the files boot read, the files in any directory boot listed, like `Dir["test/support/**/*.rb"]`, a parallel worker's `parallelize_setup`, and its class's own setup, like a `before_all`. What a class runs after its last test, like an `after_all`, counts for no test.
 
 riptide only records files git tracks or would track, so an ignored file like a key never ends up in a recorded run.
 
@@ -40,7 +40,8 @@ When a file differs from the version a test recorded, riptide works out what cha
 | A table in `db/structure.sql` or `db/schema.rb`, or its fixtures | The tests that touched the table |
 | A file a test read, a directory it listed, or a name it found missing that now exists | The tests that did that |
 | A file in `fallback_patterns`, like `Gemfile.lock` or an initializer | Every test |
-| Top-level code that runs at boot | Every test |
+| Top-level code that runs at boot, or code a parallel worker runs before its tests | Every test after it |
+| Code a test class runs before its tests, like a `before_all` | That class's tests |
 | A deleted file, or a recorded version git no longer has | The tests that recorded it |
 | Comments, blank lines, and methods reordered without crossing a class-level line like `private` | Nothing |
 
@@ -58,6 +59,7 @@ A test that failed keeps running until a later build passes it, so a failure rip
 - Code run in a process a test spawns.
 - A new method a test only probed with `respond_to?` or `try`.
 - State a class body writes into another class, like registering itself with a registry, read through that other class.
+- State one test or test class leaves behind for a later one, like an `after_all` changing what the next class sees.
 - `defined?(Foo)` and failed lexical constant reads. Lookups through `const_get` and `const_defined?` are covered.
 - Assets a browser loads during a system test. List them in `fallback_patterns` for suites that drive a browser.
 

@@ -8,7 +8,7 @@ module Riptide
 
     def setup
       Tracer.drain_load_facts
-      Tracer.drain_boot_lines
+      Tracer.drain
     end
 
     def test_a_window_records_lines_run_under_the_root
@@ -143,7 +143,7 @@ module Riptide
       path = load_traced("loading/after_broken.rb", "TRACER_AFTER_BROKEN = 1\n")
 
       refute Tracer.drain_load_facts.key?(path)
-      assert_equal({ 1 => true }, Tracer.drain_boot_lines.fetch(path))
+      assert_equal [1], Tracer.drain.lines.fetch(path)
     end
 
     def test_an_error_rescued_inside_a_class_body_keeps_it_loading
@@ -209,10 +209,10 @@ module Riptide
       assert_equal [2, 3], lines.fetch(path)
     end
 
-    def test_top_level_code_outside_a_window_is_boot_lines
+    def test_code_outside_every_window_goes_to_the_processs
       path = load_traced("boot/setup.rb", "TRACER_BOOT_SETTING = :on\n")
 
-      assert_equal({ 1 => true }, Tracer.drain_boot_lines.fetch(path))
+      assert_equal [1], Tracer.drain.lines.fetch(path)
     end
 
     def test_every_window_hears_a_line_however_often_the_last_one_ran_it
@@ -426,11 +426,78 @@ module Riptide
       assert_equal [2, 3], lines.fetch(path)
     end
 
-    def test_opening_a_window_twice_raises
+    # A method's first line shares its entry and never turns off, so each
+    # has a second line that does.
+    NESTED = <<~RUBY
+      class TracerNested
+        def outer
+          a = 1
+          a + 1
+        end
+
+        def inner
+          b = 2
+          b + 2
+        end
+
+        def after
+          c = 3
+          c + 3
+        end
+      end
+    RUBY
+
+    # Lines stop turning off in a process that ever had a global line
+    # TracePoint, so these run where none ever did.
+    def test_windows_nest_and_each_keeps_what_ran_while_it_was_innermost
+      result = in_subprocess(<<~RUBY)
+        File.write("\#{root}/nested.rb", #{NESTED.dump})
+        load "\#{root}/nested.rb"
+        nested = TracerNested.new
+        Riptide::Tracer.drain
+        Riptide::Tracer.open_window
+        nested.outer
+        Riptide::Tracer.open_window
+        nested.inner
+        inner = Riptide::Tracer.close_window
+        nested.after
+        outer = Riptide::Tracer.close_window
+        nested.after
+        process = Riptide::Tracer.drain
+        [inner, outer, process].map { |trace| [trace.lines["nested.rb"], trace.receivers.map(&:name)] }
+      RUBY
+      inner, outer, process = result
+
+      assert_equal [[7, 8, 9], ["TracerNested"]], inner
+      assert_equal [[2, 3, 4, 12, 13, 14], ["TracerNested"]], outer, "a line the inner window ran isn't the outer one's"
+      assert_equal [[12, 13, 14], []], process, "a line comes back for the process once a window closes, and it keeps no receivers"
+    end
+
+    def test_a_window_hears_a_line_the_window_around_it_just_ran
+      lines = in_subprocess(<<~RUBY)
+        File.write("\#{root}/around.rb", #{NESTED.dump})
+        load "\#{root}/around.rb"
+        around = TracerNested.new
+        around.outer
+        Riptide::Tracer.drain
+        Riptide::Tracer.open_window
+        around.outer
+        Riptide::Tracer.close_window.lines["around.rb"]
+      RUBY
+
+      assert_equal [2, 3, 4], lines
+    end
+
+    def test_draining_leaves_the_window_open
+      load_traced("window/drained.rb", NESTED.gsub("TracerNested", "TracerDrained"))
+      drained = TracerDrained.new
       Tracer.open_window
-      assert_raises(RuntimeError) { Tracer.open_window }
-    ensure
-      Tracer.close_window
+      drained.outer
+      first = Tracer.drain
+      drained.inner
+
+      assert_equal [2, 3, 4], first.lines.fetch("window/drained.rb")
+      assert_equal [7, 8, 9], Tracer.close_window.lines.fetch("window/drained.rb")
     end
 
     def test_closing_without_a_window_raises

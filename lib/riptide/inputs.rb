@@ -89,17 +89,18 @@ module Riptide
       @listings[pattern] ||= Digest::SHA1.hexdigest(JSON.generate(Dir.glob(pattern, base: @root).select { |path| known?(path) }.sort))
     end
 
-    # { path => facets } for what boot ran: the methods, blocks and
-    # constants every test in the process shares. +boot_lines+ is
-    # { path => { line => true } }.
-    def for_boot(boot_lines)
+    # { path => facets } for what ran outside every test and test class,
+    # boot included: the methods, blocks, constants and tables every later
+    # test in the process shares. +lines+ is { path => [line, ...] }.
+    def for_process(lines, tables)
       entries = Hash.new { |h, path| h[path] = {} }
-      boot_lines.each do |path, lines|
+      lines.each do |path, numbers|
         next unless recordable?(path)
 
         source = @layout.kind(path) == :ruby && source_for(path)
-        source ? ran(entries[path], entries, Set.new, lines.keys, source) : entries[path]["whole"] = true
+        source ? ran(entries[path], entries, Set.new, numbers, source) : entries[path]["whole"] = true
       end
+      tables(entries, tables)
       finish(entries)
     end
 
