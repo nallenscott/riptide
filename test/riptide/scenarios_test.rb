@@ -341,6 +341,17 @@ module Riptide
       assert_selected scenario(files: { "app/flag.rb" => flag }, body: -> { Flag.on? }, edits: { "config/flag.txt" => "x\n" })
     end
 
+    def test_a_file_the_test_checked_for_with_pathname_shows_up
+      flag = "require \"pathname\"\nclass PathFlag\n  def self.on? = Pathname(__dir__).join(\"../config/path_flag.txt\").exist?\nend\n"
+      assert_selected scenario(files: { "app/path_flag.rb" => flag }, body: -> { PathFlag.on? }, edits: { "config/path_flag.txt" => "x\n" })
+    end
+
+    def test_a_file_whose_size_the_test_checked_grows
+      quota = "class Quota\n  def self.big? = File.size(File.join(__dir__, \"../config/quota.txt\")) > 3\nend\n"
+      assert_selected scenario(files: { "app/quota.rb" => quota, "config/quota.txt" => "ab\n" }, body: -> { Quota.big? },
+                               edits: { "config/quota.txt" => "abcdef\n" })
+    end
+
     # Classes found by name, the way Pundit or an association's class_name
     # finds them, with a loader outside the app listing the directory like
     # Zeitwerk does.

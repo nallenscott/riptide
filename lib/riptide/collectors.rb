@@ -65,6 +65,8 @@ module Riptide
         IO.singleton_class.prepend(Reads) unless IO.singleton_class < Reads
         File.singleton_class.prepend(Opens) unless File.singleton_class < Opens
         File.singleton_class.prepend(Checks) unless File.singleton_class < Checks
+        FileTest.singleton_class.prepend(Checks) unless FileTest.singleton_class < Checks
+        Kernel.prepend(KernelOpens) unless Kernel < KernelOpens
         Module.prepend(Lookups) unless Module < Lookups
         Dir.singleton_class.prepend(Listings) unless Dir.singleton_class < Listings
       end
@@ -118,7 +120,7 @@ module Riptide
         target = (current || process)&.reads
         return unless target && @root_prefix
 
-        full = File.expand_path(path.to_s)
+        full = File.expand_path(path)
         target << full.delete_prefix(@root_prefix) if full.start_with?(@root_prefix)
       end
 
@@ -133,7 +135,7 @@ module Riptide
         Array(patterns).flatten.each do |pattern|
           next unless pattern.is_a?(String) || pattern.respond_to?(:to_path)
 
-          full = File.expand_path(pattern.to_s, base || Dir.pwd)
+          full = File.expand_path(pattern.to_s, base)
           target << full.delete_prefix(@root_prefix) if full.start_with?(@root_prefix)
         end
       end
@@ -176,7 +178,8 @@ module Riptide
 
     # On IO, so File, Pathname and YAML reach them too.
     module Reads
-      %i[read binread readlines foreach].each do |reader|
+      # copy_stream reads its first argument, so a path there counts.
+      %i[read binread readlines foreach copy_stream].each do |reader|
         define_method(reader) do |path, *rest, **options, &block|
           Collectors.read(path) if path.is_a?(String) || path.respond_to?(:to_path)
           super(path, *rest, **options, &block)
@@ -189,10 +192,14 @@ module Riptide
     module Opens
       %i[open new].each do |opener|
         define_method(opener) do |path, *rest, **options, &block|
-          mode = options.fetch(:mode) { rest.first.is_a?(Integer) || rest.first.is_a?(String) ? rest.first : "r" }
-          Collectors.read(path) if (path.is_a?(String) || path.respond_to?(:to_path)) && Opens.reading?(mode)
+          Opens.opened(path, rest, options)
           super(path, *rest, **options, &block)
         end
+      end
+
+      def self.opened(path, rest, options)
+        mode = options.fetch(:mode) { rest.first.is_a?(Integer) || rest.first.is_a?(String) ? rest.first : "r" }
+        Collectors.read(path) if (path.is_a?(String) || path.respond_to?(:to_path)) && reading?(mode)
       end
 
       def self.reading?(mode)
@@ -200,6 +207,16 @@ module Riptide
         when Integer then (mode & (File::WRONLY | File::RDWR)) != File::WRONLY
         else !mode.to_s.start_with?("w", "a")
         end
+      end
+    end
+
+    # Kernel#open opens a file without going through File.open.
+    module KernelOpens
+      private
+
+      def open(path, *rest, **options, &block)
+        Opens.opened(path, rest, options)
+        super
       end
     end
 
@@ -215,18 +232,33 @@ module Riptide
         super
       end
 
-      %i[children each_child entries foreach].each do |lister|
+      %i[children each_child entries foreach empty?].each do |lister|
         define_method(lister) do |dir, *rest, **options, &block|
           Collectors.listed(File.join(dir.to_s, "*"), nil) if dir.is_a?(String) || dir.respond_to?(:to_path)
           super(dir, *rest, **options, &block)
         end
       end
+
+      def exist?(path)
+        Collectors.checked(path)
+        super
+      end
     end
 
+    # On File and FileTest, which Pathname's checks go through. Whether a
+    # file is there is a listing of it. How big it is depends on what's in
+    # it, so that's a read.
     module Checks
-      %i[exist? file? directory?].each do |check|
+      %i[exist? file? directory? symlink? readable? executable?].each do |check|
         define_method(check) do |path|
           Collectors.checked(path)
+          super(path)
+        end
+      end
+
+      %i[size size? zero? empty?].each do |check|
+        define_method(check) do |path|
+          Collectors.read(path) if path.is_a?(String) || path.respond_to?(:to_path)
           super(path)
         end
       end

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "pathname"
 
 module Riptide
   class CollectorsTest < Minitest::Test
@@ -70,6 +71,39 @@ module Riptide
 
       assert_equal ["reads/written.txt"], window.reads.to_a
       assert_equal 1, window.reads.size
+    end
+
+    def test_reads_through_kernel_open_and_copy_stream_are_recorded
+      FileUtils.mkdir_p(File.join(TRACE_ROOT, "reads"))
+      %w[kernel copied written].each { |name| File.write(File.join(TRACE_ROOT, "reads/#{name}.txt"), name) }
+      Collectors.install(TRACE_ROOT)
+      window = Collectors.open
+      open(File.join(TRACE_ROOT, "reads/kernel.txt"), &:read)
+      open(File.join(TRACE_ROOT, "reads/written.txt"), "w") { |file| file.write("x") }
+      IO.copy_stream(File.join(TRACE_ROOT, "reads/copied.txt"), File::NULL)
+
+      assert_equal ["reads/copied.txt", "reads/kernel.txt"], window.reads.to_a.sort
+    end
+
+    # Pathname's checks go through FileTest. How big a file is depends on
+    # what's in it, so a size check is a read and not just a listing.
+    def test_checks_through_pathname_filetest_and_dir_are_recorded
+      FileUtils.mkdir_p(File.join(TRACE_ROOT, "checks/dir"))
+      %w[a b c d e f].each { |name| File.write(File.join(TRACE_ROOT, "checks/#{name}.txt"), name) }
+      file = ->(name) { File.join(TRACE_ROOT, "checks/#{name}.txt") }
+      Collectors.install(TRACE_ROOT)
+      window = Collectors.open
+      Pathname(file["a"]).exist?
+      FileTest.file?(file["b"])
+      File.readable?(file["c"])
+      Dir.exist?(File.join(TRACE_ROOT, "checks/dir"))
+      Dir.empty?(File.join(TRACE_ROOT, "checks/dir"))
+      File.size?(file["d"])
+      Pathname(file["e"]).zero?
+      FileTest.size(file["f"])
+
+      assert_equal ["checks/a.txt", "checks/b.txt", "checks/c.txt", "checks/dir", "checks/dir/*"], window.listings.to_a.sort
+      assert_equal ["checks/d.txt", "checks/e.txt", "checks/f.txt"], window.reads.to_a.sort
     end
 
     # Only the app's own listings count, like test_helper globbing its
