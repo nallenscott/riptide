@@ -16,6 +16,7 @@
 - File reads and checks count however they happen, including through Pathname, FileTest, `Dir.exist?`, `Kernel#open` and `IO.copy_stream`, and a size check counts as reading the file
 - Only files git knows about are recorded, and only versions from the checked-out commit are pushed
 - Runs are stored in git as a sharded index, one unit per suite and branch or pull request, with `riptide fetch` and `riptide publish`
+- The app can sit in a subdirectory of its repository
 - Tests that share a name, like specs with the same describe and it text, always run
 - Failures stay open until a later build passes the test, and a publish that fails keeps the logs for the next one
 - `riptide publish --retained-runs` sets how many runs each test keeps

@@ -146,7 +146,7 @@ module Riptide
       landed = build.harvest ? landed_units(build) : {}
       runs, stamp = @git.resolve(runs_ref(build.key)), @git.resolve(stamp_ref(build.key))
       landing = build.pr ? landing_record(build.upstream, stamp) : nil
-      head = @git.tree("HEAD").keys.to_set
+      head = @git.tree(@git.head_tree).keys.to_set
       deadline = Time.now + BUDGET
 
       loop do
@@ -340,7 +340,7 @@ module Riptide
       known = runs ? @git.tree(runs).values.to_set : Set.new
       shas = @git.write_blobs(model.encode.transform_values { |value| JSON.generate(value) }, known: known)
       pinned = model.pins | pins
-      committed = @git.tree("HEAD").values.to_set
+      committed = @git.tree(@git.head_tree).values.to_set
       model.versions.each { |sha| shas["blobs/#{sha[0, 2]}/#{sha}"] = sha if pinned.include?(sha) || committed.include?(sha) }
       @git.write_tree(shas)
     end

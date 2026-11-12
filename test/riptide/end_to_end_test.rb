@@ -72,16 +72,20 @@ module Riptide
       File.write(File.join(dir, path), content)
     end
 
-    # A clone of a fresh remote holding the app and its suite, on main.
-    def with_project
+    # A clone of a fresh remote holding the app and its suite, on main. The
+    # app sits in the +under+ directory of the repository, with a file of
+    # the repository's own beside it.
+    def with_project(under: nil)
       Dir.mktmpdir do |base|
         remote = File.join(base, "remote.git")
-        dir = File.join(base, "work")
+        top = File.join(base, "work")
         git(base, "init", "-q", "--bare", "-b", "main", remote)
-        git(base, "clone", "-q", remote, dir)
-        git(dir, "config", "user.email", "t@t")
-        git(dir, "config", "user.name", "t")
-        git(dir, "checkout", "-q", "-b", "main")
+        git(base, "clone", "-q", remote, top)
+        git(top, "config", "user.email", "t@t")
+        git(top, "config", "user.name", "t")
+        git(top, "checkout", "-q", "-b", "main")
+        write(top, "README", "repo\n") if under
+        dir = under ? File.join(top, under) : top
         write(dir, "app/widget.rb", WIDGET)
         write(dir, "app/other.rb", OTHER)
         write(dir, "test/test_helper.rb", HELPER)
@@ -121,14 +125,16 @@ module Riptide
       git(dir, "push", "-q", "origin", "main")
     end
 
-    %i[squash merge rebase].each do |style|
-      define_method(:"test_prs_main_and_releases_only_run_what_changed_with_#{style}_merges") do
-        with_project do |dir, remote|
+    { "squash_merges" => [:squash, nil], "merge_merges" => [:merge, nil], "rebase_merges" => [:rebase, nil],
+      "the_app_in_a_subdirectory" => [:squash, "svc"] }.each do |name, (style, under)|
+      define_method(:"test_prs_main_and_releases_only_run_what_changed_with_#{name}") do
+        with_project(under: under) do |dir, remote|
           assert_equal %w[test_both test_other test_widget], build(dir), "the first build has nothing recorded"
           assert_empty build(dir), "an unchanged tree runs nothing"
 
           git(dir, "checkout", "-q", "-b", "pr-a", "main")
           write(dir, "app/widget.rb", WIDGET.sub("2", "1 + 1"))
+          write(dir, "../README", "changed\n") if under
           git(dir, "commit", "-qam", "widget")
           git(dir, "checkout", "-q", "-b", "pr-b", "main")
           write(dir, "app/other.rb", OTHER.sub("3", "1 + 2"))

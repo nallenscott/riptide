@@ -110,7 +110,7 @@ Minitest 5 loads every installed plugin file by itself, so riptide does nothing 
 
 ## Sharing runs
 
-Runs live in git in the app's own repository, under `refs/riptide/`. They never touch a branch, and a plain clone doesn't fetch them.
+Runs live in git in the app's repository, under `refs/riptide/`. They never touch a branch, and a plain clone doesn't fetch them. The app can sit in a subdirectory of the repository, with the CLI run from there or given it as `--root`.
 
 Each suite keeps a unit per build: `branches/<branch>` for a branch and `prs/<number>` for a pull request. A unit is two refs, written and deleted together. `refs/riptide/runs/<suite>/<key>` holds the passing runs as an index. `refs/riptide/stamps/<suite>/<key>` holds the open failures and, for a pull request, its landing record: the branch it merges into and the files it changed. Both point at tags wrapping trees, so a publish uploads only what changed.
 

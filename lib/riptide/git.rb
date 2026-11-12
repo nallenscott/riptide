@@ -60,8 +60,8 @@ module Riptide
       raise Error, e.is_a?(IO::TimeoutError) ? "git cat-file timed out after #{@deadline}s" : "git cat-file failed: #{e.message}"
     end
 
-    # Every path git tracks or would track: committed, staged, or untracked
-    # and not ignored.
+    # Every path under the root git tracks or would track, relative to the
+    # root: committed, staged, or untracked and not ignored.
     def files
       output("ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0").to_set
     end
@@ -107,14 +107,13 @@ module Riptide
       status.zero? ? out.strip : nil
     end
 
-    # { path => [mode, object] } for every file under +tree+, recursively.
-    # With +paths+, only those, matched literally.
-    def entries(tree, paths: nil)
-      return {} if tree.nil? || paths&.empty?
+    # { path => [mode, object] } for every file in +tree+, recursively, with
+    # paths from the top of the tree. Without --full-tree, git would list
+    # only what's under the root when the root is a subdirectory.
+    def entries(tree)
+      return {} if tree.nil?
 
-      args = ["ls-tree", "-r", "-z", tree]
-      args += ["--", *paths] if paths
-      output(*args, env: { "GIT_LITERAL_PATHSPECS" => "1" }).split("\0").to_h do |entry|
+      output("ls-tree", "-r", "-z", "--full-tree", tree).split("\0").to_h do |entry|
         info, path = entry.split("\t", 2)
         mode, _, object = info.split
         [path, [mode, object]]
@@ -123,6 +122,11 @@ module Riptide
 
     # { path => blob sha } for every file in a tree.
     def tree(object) = entries(object).transform_values(&:last)
+
+    # The root's tree in the checked-out commit, whose paths are the ones
+    # riptide records: relative to the root, which can be a subdirectory of
+    # the repository.
+    def head_tree = "HEAD:#{@prefix ||= output("rev-parse", "--show-prefix").strip}"
 
     # A tree holding +files+ ({ path => sha } or { path => [mode, sha] }),
     # built in a throwaway index so the repository's own is never touched.
