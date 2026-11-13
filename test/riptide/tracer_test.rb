@@ -35,9 +35,15 @@ module Riptide
     end
 
     def test_a_window_ignores_code_outside_the_root
-      lines = traced { [3, 1, 2].sort }
+      inside = load_traced("window/inside.rb", "module TracerInside\n  def self.go = :in\nend\n")
+      Dir.mktmpdir do |outside|
+        File.write(File.join(outside, "outside.rb"), "module TracerOutside\n  def self.go\n    :out\n  end\nend\n")
+        load File.join(outside, "outside.rb")
 
-      assert_empty lines
+        lines = traced { [TracerInside.go, TracerOutside.go] }
+
+        assert_equal [inside], lines.keys
+      end
     end
 
     def test_lines_run_while_a_class_loads_are_load_facts_for_that_class
