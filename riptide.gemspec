@@ -17,7 +17,8 @@ Gem::Specification.new do |spec|
     "bug_tracker_uri" => "https://github.com/nallenscott/riptide/issues"
   }
 
-  # The tracer is built for the VM of Ruby 4.0 and later.
+  # Installs on any Ruby from 4.0 up, with the tracer on for the minors in
+  # TRACED_RUBIES.
   spec.required_ruby_version = ">= 4.0"
 
   spec.files = Dir["lib/**/*.rb", "ext/**/*.{rb,c,h}", "exe/*"] + ["riptide.gemspec"]

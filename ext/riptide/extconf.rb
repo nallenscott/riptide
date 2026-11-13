@@ -6,6 +6,7 @@ require "net/http"
 require "rubygems/package"
 require "stringio"
 require "zlib"
+require_relative "../../lib/riptide/version"
 
 # The tracer reaches into the VM, so it builds against the internal headers of
 # the exact Ruby it runs on. Ruby doesn't install those, so they come from
@@ -14,10 +15,6 @@ require "zlib"
 # source tree instead, for a build with no way out to GitHub. Without the
 # headers the gem still installs, and riptide stays off.
 module RubySource
-  # The minors whose VM the tracer is written for. Any other builds without
-  # it, so a new Ruby leaves riptide off until someone checks its VM.
-  MINORS = %w[4.0].freeze
-
   # What the headers and the generators for the missing ones need.
   KEEP = %r{\A(?:[^/]+\.h|(?:internal|ccan|prism)/.*|(?:tool|template|defs)/.*)\z}
   GENERATED = {
@@ -30,7 +27,7 @@ module RubySource
 
   def headers
     minor = RUBY_VERSION[/\A\d+\.\d+/]
-    raise "riptide's tracer isn't written for Ruby #{minor} yet" unless MINORS.include?(minor)
+    raise "riptide's tracer isn't written for Ruby #{minor} yet" unless Riptide::TRACED_RUBIES.include?(minor)
 
     given = ENV["RIPTIDE_RUBY_SOURCE"]
     return File.expand_path(given) if given && !given.empty?

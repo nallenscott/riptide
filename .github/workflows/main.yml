@@ -11,10 +11,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Every minor Ruby still maintains from riptide's floor up, as Ruby lists
-  # them, plus the latest release with AddressSanitizer for the tracer reading
-  # the VM wrong. The weekly run adds nightly, and nightly with AddressSanitizer,
-  # where the next minor shows up first. Each runs on the oldest Minitest the
+  # Every minor Ruby still maintains that the tracer is written for, plus the
+  # latest release with AddressSanitizer for the tracer reading the VM wrong.
+  # The weekly run adds every maintained minor riptide installs on, and
+  # nightly with and without AddressSanitizer, so a new minor shows up there
+  # first instead of failing every push. Each runs on the oldest Minitest the
   # gemspec allows and the newest of each major it allows.
   versions:
     runs-on: ubuntu-24.04
@@ -30,11 +31,18 @@ jobs:
         run: |
           require "json"
           require "open-uri"
+          require_relative "lib/riptide/version"
           spec = Gem::Specification.load("riptide.gemspec")
-          maintained = JSON.parse(URI("https://cache.ruby-lang.org/pub/misc/ci_versions/cruby.json").read)
-          rubies = maintained.grep(/\A\d/).select { |minor| spec.required_ruby_version.satisfied_by?(Gem::Version.new(minor)) }
-          rubies << "asan-release"
-          rubies += %w[head asan] if ENV["NIGHTLY"] == "true"
+          maintained = JSON.parse(URI("https://cache.ruby-lang.org/pub/misc/ci_versions/cruby.json").read).grep(/\A\d/)
+          installs = maintained.select { |minor| spec.required_ruby_version.satisfied_by?(Gem::Version.new(minor)) }
+          # asan-release is built from the latest release.
+          latest = maintained.max_by { |minor| Gem::Version.new(minor) }
+          if ENV["NIGHTLY"] == "true"
+            rubies = installs + %w[asan-release head asan]
+          else
+            rubies = installs & Riptide::TRACED_RUBIES
+            rubies << "asan-release" if Riptide::TRACED_RUBIES.include?(latest)
+          end
 
           allowed = spec.dependencies.find { |dependency| dependency.name == "minitest" }.requirement
           released = JSON.parse(URI("https://rubygems.org/api/v1/versions/minitest.json").read)
