@@ -13,7 +13,7 @@ module Riptide
   #   meta                  the next free id
   #   tests/<ab>            per test, its file and its kept runs as [id, at]
   #   files/<ab>            per file version, per path, its postings
-  #   listings/<ab>         per glob or absent name, its postings by value
+  #   listings/<ab>         per glob, fixture table or absent name, its postings by value
   #   members/<ab>          per shared set, the runs that point at it
   #   names/<ab>            per constant name, the runs and sets that read it
   #   manifest/<ab>         per path, its recorded versions
@@ -28,7 +28,7 @@ module Riptide
   class Index
     # Goes up whenever what a run records changes meaning, like how a method
     # is named, so older runs read as none and their tests run once.
-    FORMAT = 3
+    FORMAT = 4
     FACETS = %w[methods blocks owners tables].freeze
 
     Run = Struct.new(:id, :test, :at, keyword_init: true)

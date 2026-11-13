@@ -2,7 +2,9 @@
 
 module Riptide
   module Analysis
-    # A fixture file: any change changes its table.
+    # A fixture file: any change changes the table the recorded version
+    # filled. Rows it moves into another table show up in that table's
+    # fixture listing.
     class Fixture
       def initialize(old_text, new_text, table:)
         @changed = old_text.b != new_text.b

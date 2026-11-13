@@ -381,5 +381,9 @@ module Riptide
 
       assert_equal ["cards"], change.tables.to_a
     end
+
+    def test_an_unchanged_fixture_changes_nothing
+      assert Analysis::Fixture.new("one:\n  id: 1\n", "one:\n  id: 1\n", table: "cards").change.empty?
+    end
   end
 end

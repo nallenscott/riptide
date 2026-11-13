@@ -30,13 +30,14 @@ module Riptide
     end
 
     # +indexes+ hold the recorded runs and open failures, from every unit
-    # the build read and its logs. +listing+ returns what a recorded glob matches now.
-    def initialize(indexes:, analyzer:, root:, tests:, listing:)
+    # the build read and its logs. +pseudo+ returns what a recorded glob,
+    # fixture table or name lookup gives now.
+    def initialize(indexes:, analyzer:, root:, tests:, pseudo:)
       @indexes = indexes
       @analyzer = analyzer
       @root = root
       @tests = tests
-      @listing = listing
+      @pseudo = pseudo
       @current = {}
       @suite_reason = nil
     end
@@ -103,6 +104,7 @@ module Riptide
       postings = index.postings(path, version)
       recorded = -> { index.runs_for(postings["all"]) }
       return yield("#{Env.constant_name(path)} is defined now", recorded.call) if Env.constant?(path)
+      return yield("fixture files for #{path.delete_prefix(Env::FIXTURES)} were added or removed", recorded.call) if path.start_with?(Env::FIXTURES)
       return yield("files matching #{path.delete_prefix(Env::GLOB)} were added or removed", recorded.call) if Env.pseudo?(path)
       return yield("#{path} was deleted", recorded.call) if current.nil?
 
@@ -136,8 +138,7 @@ module Riptide
 
     def current_sha(path)
       return @current[path] if @current.key?(path)
-      return @current[path] = Env.presence(path) if Env.constant?(path)
-      return @current[path] = @listing.call(path.delete_prefix(Env::GLOB)) if Env.pseudo?(path)
+      return @current[path] = @pseudo.call(path) if Env.pseudo?(path)
 
       full = File.join(@root, path)
       @current[path] = File.file?(full) ? Diff.blob_sha(full) : nil

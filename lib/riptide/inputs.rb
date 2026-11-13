@@ -71,7 +71,7 @@ module Riptide
         files = owner_set(owner)
         result[owner] = files unless files.empty?
       end
-      inputs = finish(entries)
+      inputs = finish(entries).merge(fixture_listings(window.tables))
       window.listings.each { |pattern| inputs["#{Env::GLOB}#{pattern}"] = { "sha" => listing(pattern) } }
       # A name that turned up by the end of the test, like one an autoloader
       # registered once its namespace loaded, was never up to a new file.
@@ -86,7 +86,20 @@ module Riptide
     # the source patterns count: a support file boot requires matters
     # whether or not riptide records dependencies on it.
     def listing(pattern)
-      @listings[pattern] ||= Digest::SHA1.hexdigest(JSON.generate(Dir.glob(pattern, base: @root).select { |path| known?(path) }.sort))
+      @listings[pattern] ||= digest(Dir.glob(pattern, base: @root))
+    end
+
+    # The fixture files that fill +table+ now, as one value to compare.
+    def fixture_listing(table)
+      @listings["#{Env::FIXTURES}#{table}"] ||= digest(@layout.fixtures_by_table.fetch(table, []))
+    end
+
+    # What a recorded glob, fixture table or name lookup gives now.
+    def pseudo(key)
+      if Env.constant?(key) then Env.presence(key)
+      elsif key.start_with?(Env::FIXTURES) then fixture_listing(key.delete_prefix(Env::FIXTURES))
+      else listing(key.delete_prefix(Env::GLOB))
+      end
     end
 
     # { path => facets } for what ran outside every test and test class,
@@ -101,7 +114,7 @@ module Riptide
         source ? ran(entries[path], entries, Set.new, numbers, source) : entries[path]["whole"] = true
       end
       tables(entries, tables)
-      finish(entries)
+      finish(entries).merge(fixture_listings(tables))
     end
 
     def sha(path)
@@ -217,6 +230,12 @@ module Riptide
         @layout.fixtures_by_table.fetch(table, []).each { |path| add(entries[path], "tables", table) if recordable?(path) }
       end
     end
+
+    def fixture_listings(tables)
+      tables.to_h { |table| ["#{Env::FIXTURES}#{table}", { "sha" => fixture_listing(table) }] }
+    end
+
+    def digest(paths) = Digest::SHA1.hexdigest(JSON.generate(paths.select { |path| known?(path) }.sort))
 
     def locales
       @locales ||= @locale_patterns.flat_map { |pattern| Dir.glob(pattern, base: @root) }.select { |path| recordable?(path) && File.file?(File.join(@root, path)) }

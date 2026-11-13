@@ -49,7 +49,7 @@ module Riptide
     def select(store, layout, inputs, tests)
       analyzer = Analyzer.new(layout: layout, blobs: store.method(:read_blob), load_facts: store.method(:load_facts))
       selector = Selector.new(indexes: store.indexes, analyzer: analyzer, root: @root, tests: tests,
-                              listing: inputs.method(:listing))
+                              pseudo: inputs.method(:pseudo))
       decision = selector.select
       store.append_selected(decision.selected.map { |entry| entry[:test] })
       selector.hits.each { |index, hits| store.append_hits(index, hits.keys) if index.ref }

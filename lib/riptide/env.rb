@@ -11,6 +11,10 @@ module Riptide
   # every test without touching any file a run recorded.
   module Env
     GLOB = "glob:"
+    # The fixture files that fill a table, as "fixtures:<table>". A new
+    # file, or one that starts filling the table, changes what a test
+    # that touched it loads.
+    FIXTURES = "fixtures:"
     # A constant a test looked up by name and didn't find, as
     # "const:<scope> <name>", counting the scope's ancestors or not.
     CONSTANT = "const:"
@@ -36,7 +40,7 @@ module Riptide
       files.sort.to_h
     end
 
-    def pseudo?(path) = path.start_with?(GLOB, CONSTANT, OWN_CONSTANT)
+    def pseudo?(path) = path.start_with?(GLOB, FIXTURES, CONSTANT, OWN_CONSTANT)
 
     def constant?(path) = path.start_with?(CONSTANT, OWN_CONSTANT)
 

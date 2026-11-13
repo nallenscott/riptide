@@ -95,8 +95,8 @@ module Riptide
       end
 
       analyzer = Analyzer.new(layout: layout, blobs: store.method(:read_blob), load_facts: store.method(:load_facts))
-      listing = Inputs.new(layout: layout, files: Git.new(TRACE_ROOT).files).method(:listing)
-      decision = Selector.new(indexes: store.indexes, analyzer: analyzer, root: TRACE_ROOT, tests: [%w[ScenarioTest test_it]], listing: listing).select
+      pseudo = Inputs.new(layout: layout, files: Git.new(TRACE_ROOT).files).method(:pseudo)
+      decision = Selector.new(indexes: store.indexes, analyzer: analyzer, root: TRACE_ROOT, tests: [%w[ScenarioTest test_it]], pseudo: pseudo).select
       Outcome.new(before, after, decision.selected.map { |entry| entry[:reason] })
     end
 

@@ -70,7 +70,7 @@ module Riptide
           random = Random.new(seed)
           scenario = Scenario.new(random, root)
           indexes = scenario.models.zip(scenario.marks).map { |model, marks| Index.of(model.encode, marks: marks) }
-          selector = Selector.new(indexes: indexes, analyzer: scenario, root: root, tests: scenario.tests, listing: scenario.method(:listing))
+          selector = Selector.new(indexes: indexes, analyzer: scenario, root: root, tests: scenario.tests, pseudo: scenario.method(:current))
           decision = selector.select
 
           assert_equal scenario.expected, decision.selected.map { |entry| entry[:test] }.sort, "seed #{seed}"
@@ -109,8 +109,6 @@ module Riptide
         @models = Array.new(random.rand(1..3)) { build_model }
         @marks = @models.map { @tests.select { random.rand < 0.15 }.to_h { |test| [test, Set[format("%032x", random.rand(2**64))]] } }
       end
-
-      def listing(_pattern) = @listing
 
       # The Analyzer's half: what changed from +version+ to the tree.
       def change(path, version)
@@ -184,7 +182,7 @@ module Riptide
         results.include?(:suite) ? :suite : results.any?
       end
 
-      def current(path) = path.start_with?("glob:") ? @listing : (Env.constant?(path) ? Env.presence(path) : @current[path])
+      def current(path) = path.start_with?(Env::GLOB) ? @listing : (Env.constant?(path) ? Env.presence(path) : @current[path])
 
       def file_hit(path, facets, read)
         current = current(path)

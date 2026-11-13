@@ -40,7 +40,7 @@ module Riptide
         Analysis::Ruby.new(old_text, new_text, load_facts: @load_facts.call(old_sha), overrides: ->(name) { overrides?(name, path) }, ancestors: method(:ancestors)).change
       when :sql then Analysis::Sql.new(old_text, new_text).change
       when :schema then Analysis::Schema.new(old_text, new_text).change
-      when :fixture then Analysis::Fixture.new(old_text, new_text, table: @layout.fixture_table(path, new_text)).change
+      when :fixture then Analysis::Fixture.new(old_text, new_text, table: @layout.fixture_table(path, old_text)).change
       else Change.new.tap { |change| change.whole! unless old_text.b == new_text.b }
       end
     end

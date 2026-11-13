@@ -9,6 +9,7 @@
 - A class header counts as the class's declaration through the end of its superclass, so editing a `Struct.new(` that wraps onto more lines selects the class's tests
 - A sequence in `structure.sql` changes the tables that own it or take their ids from it, so adding a table no longer reruns every test that touched the database
 - A foreign key in `structure.sql` changes the table it points at too, so tests that touched that table get selected
+- A fixture file added, deleted or moved to another model selects the tests that touched the tables it fills or used to
 - Reordering methods selects nothing unless one moves past a class-level line like `private`
 - Every git call runs under a deadline, including the blob reader and the diffs
 - Tests depend on what ran before them outside any test: boot, a parallel worker's setup, and their own class's setup, like a `before_all`, but not its `after_all`

@@ -47,10 +47,28 @@ module Riptide
       File.write(path, File.read(path).sub(from, to))
     end
 
+    # A run of +test+ that queried +tables+, recorded the way Inputs does,
+    # in the test or before it in the process.
+    def record_tables(*tables, test: TEST, process: false)
+      inputs = Inputs.new(layout: Layout.new(root: @root), files: Git.new(@root).files)
+      if process
+        env = inputs.for_process({}, Set.new(tables))
+        @store.append_set(Store.set_id(env), env)
+        @store.append_run(Store::Run.new(test: test, at: 1.0, passed: true, sets: [Store.set_id(env)], inputs: {}))
+      else
+        window = Collectors::Window.blank.tap { |blank| blank.tables.merge(tables) }
+        files, sets = inputs.for_test(Struct.new(:lines, :receivers).new({}, []), window)
+        @store.append_run(Store::Run.new(test: test, at: 1.0, passed: true, sets: sets.keys, inputs: files))
+      end
+    end
+
+    # +listings+ stands in for what recorded globs match now.
     def reasons(tests = [TEST], listings: {})
       layout = Layout.new(root: @root)
       analyzer = Analyzer.new(layout: layout, blobs: @store.method(:read_blob), load_facts: @store.method(:load_facts))
-      Selector.new(indexes: @store.indexes, analyzer: analyzer, root: @root, tests: tests, listing: ->(pattern) { listings[pattern] }).select.selected.map { |entry| entry[:reason] }
+      inputs = Inputs.new(layout: layout, files: Git.new(@root).files)
+      pseudo = ->(key) { listings.fetch(key) { inputs.pseudo(key) } }
+      Selector.new(indexes: @store.indexes, analyzer: analyzer, root: @root, tests: tests, pseudo: pseudo).select.selected.map { |entry| entry[:reason] }
     end
 
     def test_a_test_with_no_recorded_run_is_selected
@@ -216,12 +234,69 @@ module Riptide
       end
     end
 
+    module SelectorPerson
+      def self.table_name = "people"
+    end
+
+    module SelectorMember
+      def self.table_name = "members"
+    end
+
+    PEOPLE = "_fixture:\n  model_class: Riptide::SelectorTest::SelectorPerson\n\none:\n  name: a\n"
+    MEMBERS_TEST = %w[MemberTest test_it].freeze
+
+    # The rows leave people when the file starts filling members instead.
+    def test_a_fixture_moved_to_another_model_selects_tests_that_touched_its_old_table
+      with_widget do
+        write_and_commit(@root, "test/fixtures/people.yml", PEOPLE, message: "fixture")
+        record_tables("people")
+        File.write(File.join(@root, "test/fixtures/people.yml"), PEOPLE.sub("SelectorPerson", "SelectorMember"))
+
+        assert_equal ["fixture files for people were added or removed"], reasons
+      end
+    end
+
+    # A test that touched members never loaded people.yml, so only the
+    # fixture files for its table can say the rows arrived.
+    def test_a_fixture_moved_to_another_model_selects_tests_that_touched_its_new_table
+      with_widget do
+        write_and_commit(@root, "test/fixtures/people.yml", PEOPLE, message: "fixture")
+        record_tables("members", test: MEMBERS_TEST)
+        assert_empty reasons([MEMBERS_TEST])
+
+        File.write(File.join(@root, "test/fixtures/people.yml"), PEOPLE.sub("SelectorPerson", "SelectorMember"))
+        assert_equal ["fixture files for members were added or removed"], reasons([MEMBERS_TEST])
+      end
+    end
+
+    def test_a_new_fixture_file_selects_only_tests_that_touched_its_table
+      with_widget do
+        write_and_commit(@root, "test/fixtures/people.yml", PEOPLE, message: "fixture")
+        record_tables("cards")
+        record_tables("people", test: MEMBERS_TEST)
+        FileUtils.mkdir_p(File.join(@root, "test/fixtures"))
+        File.write(File.join(@root, "test/fixtures/cards.yml"), "one:\n  id: 1\n")
+
+        assert_equal ["fixture files for cards were added or removed"], reasons([TEST, MEMBERS_TEST])
+      end
+    end
+
+    def test_a_new_fixture_file_selects_tests_whose_process_touched_its_table
+      with_widget do
+        record_tables("cards", process: true)
+        assert_empty reasons
+
+        write_and_commit(@root, "test/fixtures/cards.yml", "one:\n  id: 1\n", message: "fixture")
+        assert_equal ["fixture files for cards were added or removed"], reasons
+      end
+    end
+
     def test_a_new_file_matching_a_recorded_glob_selects_the_test
       with_widget do
         record(env: { "glob:test/support/**/*.rb" => { "sha" => "before" } })
 
-        assert_empty reasons(listings: { "test/support/**/*.rb" => "before" })
-        assert_equal ["files matching test/support/**/*.rb were added or removed"], reasons(listings: { "test/support/**/*.rb" => "after" })
+        assert_empty reasons(listings: { "glob:test/support/**/*.rb" => "before" })
+        assert_equal ["files matching test/support/**/*.rb were added or removed"], reasons(listings: { "glob:test/support/**/*.rb" => "after" })
       end
     end
 
