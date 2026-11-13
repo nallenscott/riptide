@@ -8,6 +8,7 @@ module Riptide
   # changes what it does. Each runs in a fork, so its classes never reach
   # this process.
   class ScenariosTest < Minitest::Test
+    include NeedsTracer
     Outcome = Struct.new(:before, :after, :reasons) do
       def changed? = before != after
     end

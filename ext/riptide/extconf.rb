@@ -14,6 +14,9 @@ require_relative "../../lib/riptide/version"
 # while it builds generated the same way. RIPTIDE_RUBY_SOURCE points at a
 # source tree instead, for a build with no way out to GitHub. Without the
 # headers the gem still installs, and riptide stays off.
+#
+# RIPTIDE_TRACER=on builds the tracer on a Ruby it isn't written for yet, to
+# see whether it works there, and RIPTIDE_TRACER=off builds without it.
 module RubySource
   # What the headers and the generators for the missing ones need.
   KEEP = %r{\A(?:[^/]+\.h|(?:internal|ccan|prism)/.*|(?:tool|template|defs)/.*)\z}
@@ -26,9 +29,6 @@ module RubySource
   module_function
 
   def headers
-    minor = RUBY_VERSION[/\A\d+\.\d+/]
-    raise "riptide's tracer isn't written for Ruby #{minor} yet" unless Riptide::TRACED_RUBIES.include?(minor)
-
     given = ENV["RIPTIDE_RUBY_SOURCE"]
     return File.expand_path(given) if given && !given.empty?
 
@@ -86,6 +86,10 @@ end
 off = nil
 begin
   raise "riptide only traces CRuby" unless RUBY_ENGINE == "ruby"
+  raise "RIPTIDE_TRACER is off" if ENV["RIPTIDE_TRACER"] == "off"
+
+  minor = RUBY_VERSION[/\A\d+\.\d+/]
+  raise "riptide's tracer isn't written for Ruby #{minor} yet" unless ENV["RIPTIDE_TRACER"] == "on" || Riptide::TRACED_RUBIES.include?(minor)
 
   $INCFLAGS << " -I#{RubySource.headers}"
   $CFLAGS << " -Wno-unused-function -Wno-unused-parameter"

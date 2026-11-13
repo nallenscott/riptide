@@ -5,6 +5,7 @@ require "tempfile"
 
 module Riptide
   class RecorderTest < Minitest::Test
+    include NeedsTracer
     include TracedFixture
 
     CONCERN = <<~RUBY

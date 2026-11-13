@@ -5,10 +5,9 @@ require "json"
 require "open3"
 
 module Riptide
-  # Separate Minitest processes against a repository with a remote, the way
-  # CI runs them: fetch, run, publish, across a PR, merges to main, and a
-  # release branch.
-  class EndToEndTest < Minitest::Test
+  # An app with its suite, in a repository with a remote, run in separate
+  # Minitest processes the way CI runs them: fetch, run, publish.
+  module EndToEndProject
     LIB = File.expand_path("../../lib", __dir__)
     EXE = File.expand_path("../../exe/riptide", __dir__)
 
@@ -128,6 +127,12 @@ module Riptide
       end
       git(dir, "push", "-q", "origin", "main")
     end
+  end
+
+  # Across a PR, merges to main, and a release branch.
+  class EndToEndTest < Minitest::Test
+    include EndToEndProject
+    include NeedsTracer
 
     { "squash_merges" => [:squash, nil], "merge_merges" => [:merge, nil], "rebase_merges" => [:rebase, nil],
       "the_app_in_a_subdirectory" => [:squash, "svc"] }.each do |name, (style, under)|
@@ -276,6 +281,28 @@ module Riptide
         secret = Diff.blob_sha(File.join(dir, "config/master.key"))
         refute_includes git(remote, "ls-tree", "-r", "refs/riptide/runs/unit/branches/main"), secret
         refute_includes git(remote, "rev-list", "--objects", "--all"), secret
+      end
+    end
+  end
+
+  # riptide built without its tracer leaves an app's suite running in full,
+  # unrecorded, and publishing saves nothing.
+  class TracerOffTest < Minitest::Test
+    include EndToEndProject
+
+    def test_the_suite_runs_in_full_and_nothing_is_saved
+      skip "the tracer is on, so the build without it covers this" if Riptide::Tracer::SUPPORTED
+
+      with_project do |dir, remote|
+        flags = %w[--branch main --harvest]
+        sh(dir, "ruby", EXE, "fetch", *flags)
+        output = sh(dir, "ruby", "-I", LIB, "test/suite_test.rb")
+        assert_match(/\[riptide\] unit: off for this run, .*built without its tracer/, output)
+        assert_match(/3 runs, 3 assertions, 0 failures, 0 errors/, output)
+        refute File.exist?(File.join(dir, "tmp/plan.json"))
+
+        sh(dir, "ruby", EXE, "publish", "--suite", "unit", *flags)
+        assert_empty git(remote, "for-each-ref", "refs/riptide/")
       end
     end
   end

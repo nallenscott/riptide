@@ -13,6 +13,23 @@ TRACE_ROOT = File.realpath(Dir.mktmpdir("riptide-trace"))
 system("git", "init", "-q", TRACE_ROOT, exception: true)
 Riptide::Tracer.install(TRACE_ROOT)
 
+# The tracer is off on purpose when the build was told so or the Ruby is one
+# it isn't written for. Off anywhere else, the build broke, and skipping the
+# tests that need it would hide that.
+unless Riptide::Tracer::SUPPORTED
+  setting = ENV.fetch("RIPTIDE_TRACER", "")
+  meant_on = setting == "on" || (setting != "off" && Riptide::TRACED_RUBIES.include?(RUBY_VERSION[/\A\d+\.\d+/]))
+  abort "riptide's tracer should have built here and didn't: #{Riptide::Tracer::UNSUPPORTED}" if meant_on
+end
+
+# Tests that need the tracer skip when it's off on purpose.
+module NeedsTracer
+  def before_setup
+    skip "the tracer is off: #{Riptide::Tracer::UNSUPPORTED}" unless Riptide::Tracer::SUPPORTED
+    super
+  end
+end
+
 module GitFixture
   def in_repo
     Dir.mktmpdir do |root|

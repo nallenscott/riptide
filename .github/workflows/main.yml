@@ -13,15 +13,19 @@ on:
 jobs:
   # Every minor Ruby still maintains that the tracer is written for, plus the
   # latest release with AddressSanitizer for the tracer reading the VM wrong.
+  # Each runs on the oldest Minitest the gemspec allows and the newest of
+  # each major it allows. One more job builds riptide without its tracer,
+  # the way it installs on a Ruby it isn't written for.
+  #
   # The weekly run adds every maintained minor riptide installs on, and
-  # nightly with and without AddressSanitizer, so a new minor shows up there
-  # first instead of failing every push. Each runs on the oldest Minitest the
-  # gemspec allows and the newest of each major it allows.
+  # nightly with and without AddressSanitizer, all with the tracer built
+  # whether it's written for them or not. A failure there is a new Ruby the
+  # tracer doesn't work on yet, weeks before it ships, instead of every push
+  # failing the day it does.
   versions:
     runs-on: ubuntu-24.04
     outputs:
-      rubies: ${{ steps.list.outputs.rubies }}
-      minitests: ${{ steps.list.outputs.minitests }}
+      jobs: ${{ steps.list.outputs.jobs }}
     steps:
       - uses: actions/checkout@v4
       - id: list
@@ -51,21 +55,25 @@ jobs:
             .select { |version| allowed.satisfied_by?(version) }
           minitests = ([released.min] + released.group_by { |version| version.segments.first }.values.map(&:max)).uniq.sort.map(&:to_s)
 
-          File.write(ENV.fetch("GITHUB_OUTPUT"), "rubies=#{rubies.to_json}\nminitests=#{minitests.to_json}\n", mode: "a")
-          puts rubies.inspect, minitests.inspect
+          tracer = ENV["NIGHTLY"] == "true" ? "on" : ""
+          jobs = rubies.product(minitests).map { |ruby, minitest| { ruby: ruby, minitest: minitest, tracer: tracer } }
+          jobs << { ruby: (installs & Riptide::TRACED_RUBIES).max_by { |minor| Gem::Version.new(minor) }, minitest: minitests.last, tracer: "off" }
+
+          File.write(ENV.fetch("GITHUB_OUTPUT"), "jobs=#{jobs.to_json}\n", mode: "a")
+          jobs.each { |job| puts job.values.join(" ") }
 
   build:
     needs: versions
     # The AddressSanitizer builds only come for 24.04 and later.
     runs-on: ubuntu-24.04
-    name: Ruby ${{ matrix.ruby }}, Minitest ${{ matrix.minitest }}
+    name: Ruby ${{ matrix.ruby }}, Minitest ${{ matrix.minitest }}${{ matrix.tracer && format(', tracer {0}', matrix.tracer) || '' }}
     strategy:
       fail-fast: false
       matrix:
-        ruby: ${{ fromJson(needs.versions.outputs.rubies) }}
-        minitest: ${{ fromJson(needs.versions.outputs.minitests) }}
+        include: ${{ fromJson(needs.versions.outputs.jobs) }}
     env:
       MINITEST: ${{ matrix.minitest }}
+      RIPTIDE_TRACER: ${{ matrix.tracer }}
 
     steps:
       - uses: actions/checkout@v4

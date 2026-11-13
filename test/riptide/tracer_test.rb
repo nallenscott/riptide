@@ -4,6 +4,7 @@ require "test_helper"
 
 module Riptide
   class TracerTest < Minitest::Test
+    include NeedsTracer
     include TracedFixture
 
     def setup
