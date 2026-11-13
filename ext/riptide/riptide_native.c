@@ -31,7 +31,7 @@ extern const uint8_t rb_vm_insn_len_info[];
 static VALUE mRiptide;
 static VALUE mTracer;
 
-static VALUE stacks = Qnil;        // thread => [class, frame depth, ...] being defined
+static VALUE stacks = Qnil;        // thread => [class, frame depth, body iseq, ...] being defined
 static long loading = 0;           // classes being defined, summed over threads
 
 static VALUE window = Qnil;        // relative path => byte map String, for the innermost window
@@ -142,16 +142,55 @@ frame_depth(rb_trace_arg_t *arg)
 static VALUE
 current_owner(VALUE stack)
 {
-    return rb_ary_entry(stack, -2);
+    return rb_ary_entry(stack, -3);
 }
 
-static void
+// Nil once the thread has no class bodies left.
+static VALUE
 pop_owner(VALUE stack)
 {
     rb_ary_pop(stack);
     rb_ary_pop(stack);
+    rb_ary_pop(stack);
     loading--;
-    if (RARRAY_LEN(stack) == 0) rb_hash_delete(stacks, rb_thread_current());
+    if (RARRAY_LEN(stack) > 0) return stack;
+
+    rb_hash_delete(stacks, rb_thread_current());
+    return Qnil;
+}
+
+// Whether the innermost class body is still running: its frame is still
+// on the stack where it opened, running the body.
+static int
+body_open(VALUE stack, rb_trace_arg_t *arg)
+{
+    long depth = FIX2LONG(rb_ary_entry(stack, -2));
+    if (frame_depth(arg) < depth) return 0;
+
+    const rb_control_frame_t *cfp = RUBY_VM_END_CONTROL_FRAME(arg->ec) - depth;
+    return (VALUE)cfp->iseq == rb_ary_entry(stack, -1);
+}
+
+// The thread's class bodies, without the ones it left with no end event.
+// An error, a throw or anything else that unwinds a body skips its end,
+// so a body counts until its frame is gone.
+static VALUE
+open_stack(rb_trace_arg_t *arg)
+{
+    VALUE stack = current_stack(0);
+    while (!NIL_P(stack) && !body_open(stack, arg)) stack = pop_owner(stack);
+    return stack;
+}
+
+// A thread that died inside a class body never comes back to close it.
+static int
+drop_dead(VALUE thread, VALUE stack, VALUE arg)
+{
+    (void)arg;
+    if (((rb_thread_t *)RTYPEDDATA_GET_DATA(thread))->status != THREAD_KILLED) return ST_CONTINUE;
+
+    loading -= RARRAY_LEN(stack) / 3;
+    return ST_DELETE;
 }
 
 // `class << obj` on a plain object opens a class nothing else will ever
@@ -159,13 +198,16 @@ pop_owner(VALUE stack)
 // already went off come back first, so everything the class body runs is a
 // load fact, even code the test ran before.
 static void
-on_class(VALUE klass, VALUE relative, long depth)
+on_class(VALUE klass, VALUE relative, rb_trace_arg_t *arg)
 {
+    rb_hash_foreach(stacks, drop_dead, Qnil);
+    open_stack(arg);
     if (loading == 0) rearm();
 
     VALUE stack = current_stack(1);
     rb_ary_push(stack, klass);
-    rb_ary_push(stack, LONG2FIX(depth));
+    rb_ary_push(stack, LONG2FIX(frame_depth(arg)));
+    rb_ary_push(stack, (VALUE)arg->cfp->iseq);
     loading++;
 
     if (RB_TYPE_P(klass, T_CLASS) && FL_TEST(klass, FL_SINGLETON)) {
@@ -177,25 +219,10 @@ on_class(VALUE klass, VALUE relative, long depth)
 }
 
 static void
-on_end(void)
+on_end(rb_trace_arg_t *arg)
 {
-    VALUE stack = current_stack(0);
-    if (NIL_P(stack) || RARRAY_LEN(stack) == 0) return;
-
-    pop_owner(stack);
-}
-
-// A class body that raises never reaches its end event. Once something
-// shallower rescues the error, the bodies it unwound are done loading. The
-// rescue clause runs a frame below the one that rescued, so every body at or
-// below its depth was unwound.
-static void
-on_rescue(long depth)
-{
-    VALUE stack = current_stack(0);
-    if (NIL_P(stack) || RARRAY_LEN(stack) == 0) return;
-
-    while (RARRAY_LEN(stack) > 0 && FIX2LONG(rb_ary_entry(stack, -1)) >= depth) pop_owner(stack);
+    VALUE stack = open_stack(arg);
+    if (!NIL_P(stack)) pop_owner(stack);
 }
 
 static void
@@ -264,11 +291,11 @@ hook(VALUE data, rb_trace_arg_t *arg)
     rb_event_flag_t event = arg->event;
 
     if (event == RUBY_EVENT_CLASS) {
-        on_class(arg->self, probes->relative, frame_depth(arg));
+        on_class(arg->self, probes->relative, arg);
         return;
     }
     if (event == RUBY_EVENT_END) {
-        on_end();
+        on_end(arg);
         return;
     }
 
@@ -283,8 +310,8 @@ hook(VALUE data, rb_trace_arg_t *arg)
     VALUE lineno = INT2FIX(line);
 
     if (loading > 0) {
-        VALUE stack = current_stack(0);
-        if (!NIL_P(stack) && RARRAY_LEN(stack) > 0) {
+        VALUE stack = open_stack(arg);
+        if (!NIL_P(stack)) {
             record_load(probes->relative, current_owner(stack), lineno, !probes->class_body);
             return;
         }
@@ -312,13 +339,6 @@ hook(VALUE data, rb_trace_arg_t *arg)
     }
 }
 
-static void
-rescue_hook(VALUE data, rb_trace_arg_t *arg)
-{
-    (void)data;
-    if (loading > 0) on_rescue(frame_depth(arg));
-}
-
 static rb_ractor_t *
 current_ractor(void)
 {
@@ -332,9 +352,6 @@ tracer_install(VALUE self)
     if (installed) rb_raise(rb_eRuntimeError, "Riptide::Tracer is already installed");
 
     installed = 1;
-    // A class body that raises is usually rescued outside the app, so
-    // rescues are heard everywhere. They're rare enough to cost nothing.
-    rb_add_event_hook2((rb_event_hook_func_t)rescue_hook, RUBY_EVENT_RESCUE, Qnil, RUBY_EVENT_HOOK_FLAG_SAFE | RUBY_EVENT_HOOK_FLAG_RAW_ARG);
     return Qnil;
 }
 

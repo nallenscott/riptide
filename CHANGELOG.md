@@ -2,6 +2,7 @@
 
 - Rebuilt around recorded runs keyed by git blob sha, with selection against the working tree instead of a diff base
 - A tracer that sees classes load, so load-time code belongs to the classes it ran for
+- A class body left without reaching its end, through an error, a `throw` or its thread dying, stops counting as loading once its frame is gone
 - The tracer hooks the VM's trace instructions in app code only, so YJIT keeps everything it compiled, and each line costs a test one hit however often it runs
 - Changes are analyzed by what changed: methods and blocks as a whole, constants, declarations, tables and whole files
 - A method in a concern's `class_methods` block counts as one of its ClassMethods, so a new one that could take over a class method selects the tests of every class that includes the concern

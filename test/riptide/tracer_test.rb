@@ -185,6 +185,67 @@ module Riptide
       assert_equal ["TracerOuter"], Tracer.drain_load_facts.fetch(path).fetch(9)["owners"]
     end
 
+    # A throw leaves a class body with no end and no rescue to say so,
+    # whether what runs next sits shallower than the body did or deeper.
+    def test_a_class_body_thrown_out_of_stops_loading
+      shallow = load_traced("loading/thrown.rb", <<~RUBY)
+        catch(:tracer_out) do
+          class TracerThrown
+            throw :tracer_out
+          end
+        end
+        TRACER_AFTER_THROWN = 1
+      RUBY
+      catch(:tracer_out) do
+        load_traced("loading/thrown_again.rb", <<~RUBY)
+          class TracerThrownAgain
+            throw :tracer_out
+          end
+        RUBY
+      end
+      deep = 1.then { 1.then { 1.then { load_traced("loading/after_deep.rb", "TRACER_AFTER_DEEP = 1\n") } } }
+
+      facts = Tracer.drain_load_facts
+      lines = Tracer.drain.lines
+      refute facts.fetch(shallow).key?(6), "after the body, shallower"
+      assert_includes lines.fetch(shallow), 6
+      refute facts.key?(deep), "after the body, deeper"
+      assert_equal [1], lines.fetch(deep)
+    end
+
+    # A thread that dies from an error is cleaned up without a rescue, so
+    # the class bodies it was in never say they're done.
+    def test_a_thread_that_dies_inside_a_class_body_stops_loading
+      helper = load_traced("dead/helper.rb", <<~RUBY)
+        module TracerDeadHelper
+          def self.setting
+            value = :on
+            value
+          end
+        end
+      RUBY
+      Thread.new do
+        Thread.current.report_on_exception = false
+        load_traced("dead/broken.rb", <<~RUBY)
+          class TracerDeadBroken
+            raise "boom"
+          end
+        RUBY
+      end.join rescue RuntimeError
+      Tracer.drain_load_facts
+
+      Tracer.open_window
+      TracerDeadHelper.setting
+      load_traced("dead/user.rb", <<~RUBY)
+        class TracerDeadUser
+          SETTING = TracerDeadHelper.setting
+        end
+      RUBY
+      Tracer.close_window
+
+      assert_equal [2, 3, 4], Tracer.drain_load_facts.fetch(helper).keys.sort, "lines the window turned off come back for the class body"
+    end
+
     # A class body can't see locals, so the loader reaches its queues
     # through constants.
     TracerGate = Queue.new
