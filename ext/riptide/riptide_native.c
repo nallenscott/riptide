@@ -67,6 +67,7 @@ typedef struct rb_event_hook_struct {
 // The probes in one instruction sequence, sorted by pc.
 typedef struct {
     const rb_iseq_t *iseq;
+    const rb_hook_list_t *hooks;   // the iseq's hook list, which other tools' targeted hooks join
     VALUE relative;
     int class_body;
     unsigned int count;
@@ -284,6 +285,20 @@ find_probe(const probes_t *probes, unsigned int pc)
     return -1;
 }
 
+static void hook(VALUE data, rb_trace_arg_t *arg);
+
+// Whether another hook on the iseq listens for +line+, like a debugger's
+// breakpoint, so its instruction has to stay traced.
+static int
+line_heard_elsewhere(const probes_t *probes, int line)
+{
+    for (const hook_t *h = (const hook_t *)probes->hooks->hooks; h; h = h->next) {
+        if (h->func == (rb_event_hook_func_t)hook || h->hook_flags & RUBY_EVENT_HOOK_FLAG_DELETED) continue;
+        if (h->events & RUBY_EVENT_LINE && (h->filter.target_line == 0 || h->filter.target_line == (unsigned int)line)) return 1;
+    }
+    return 0;
+}
+
 static void
 hook(VALUE data, rb_trace_arg_t *arg)
 {
@@ -331,8 +346,9 @@ hook(VALUE data, rb_trace_arg_t *arg)
         }
     }
 
-    // A global hook on this pc, like coverage or a debugger, needs it traced.
-    if (event == RUBY_EVENT_LINE && probes->plain[i] && !(probes->iseq->aux.exec.global_trace_events & probes->events[i])) {
+    // A global hook on this pc, like coverage, or another hook aimed at the
+    // line, like a breakpoint, needs it traced.
+    if (event == RUBY_EVENT_LINE && probes->plain[i] && !(probes->iseq->aux.exec.global_trace_events & probes->events[i]) && !line_heard_elsewhere(probes, line)) {
         VALUE *at = &encoded[pc];
         push_rearm(at, *at);
         *at = probes->plain[i];
@@ -505,6 +521,7 @@ tracer_target(VALUE self, VALUE iseqw, VALUE relative)
         list->type = hook_list_type_targeted_iseq;
         st_insert(ractor->pub.targeted_hooks, (st_data_t)iseq, (st_data_t)list);
     }
+    probes->hooks = list;
     h->next = (hook_t *)list->hooks;
     list->hooks = (struct rb_event_hook_struct *)h;
     list->events |= EVENTS;

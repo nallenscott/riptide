@@ -4,6 +4,7 @@
 - A tracer that sees classes load, so load-time code belongs to the classes it ran for
 - A class body left without reaching its end, through an error, a `throw` or its thread dying, stops counting as loading once its frame is gone
 - The tracer hooks the VM's trace instructions in app code only, so YJIT keeps everything it compiled, and each line costs a test one hit however often it runs
+- A line another tool aims a TracePoint at, like a debugger breakpoint, stays traced, so the breakpoint hears every run
 - Changes are analyzed by what changed: methods and blocks as a whole, constants, declarations, tables and whole files
 - A method in a concern's `class_methods` block counts as one of its ClassMethods, so a new one that could take over a class method selects the tests of every class that includes the concern
 - A new method in a concern's `included` or `prepended` block selects the tests of every class that includes it, since it lands ahead of what that class defined before including it

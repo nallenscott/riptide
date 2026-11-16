@@ -363,6 +363,69 @@ module Riptide
       assert_equal [2, 3, 4], traced { TracerWatched.go }.fetch(path)
     end
 
+    BREAKPOINT = <<~RUBY
+      module TracerBreakpoint
+        def self.go
+          value = :went
+          value = value.to_s
+          value
+        end
+      end
+    RUBY
+
+    # A debugger's breakpoint is a line TracePoint aimed at one method and
+    # line, so it hooks the same instruction sequence the tracer does. Its
+    # line stays traced, and the tracer's other lines still turn off, which
+    # only a run after a drain shows. A process that ever had a global line
+    # TracePoint never turns lines off, so this runs on its own.
+    def test_a_breakpoint_hears_every_run_of_its_line
+      result = in_subprocess(<<~RUBY)
+        File.write("\#{root}/breakpoint.rb", #{BREAKPOINT.dump})
+        load "\#{root}/breakpoint.rb"
+        after_a_drain = lambda do
+          Riptide::Tracer.open_window
+          TracerBreakpoint.go
+          Riptide::Tracer.drain
+          TracerBreakpoint.go
+          Riptide::Tracer.close_window.lines.fetch("breakpoint.rb")
+        end
+        heard = []
+        breakpoint = TracePoint.new(:line) { |tp| heard << tp.lineno }
+        result = breakpoint.enable(target: TracerBreakpoint.method(:go), target_line: 5) do
+          Riptide::Tracer.open_window
+          3.times { TracerBreakpoint.go }
+          { window: Riptide::Tracer.close_window.lines.fetch("breakpoint.rb"), breakpoint: after_a_drain.call }
+        end
+        result[:gone] = after_a_drain.call
+        TracePoint.new(:line, &:disable).enable(target: TracerBreakpoint.method(:go), target_line: 5)
+        result.merge(one_shot: after_a_drain.call, heard: heard)
+      RUBY
+
+      assert_equal [5] * 5, result[:heard]
+      assert_equal [2, 3, 4, 5], result[:window]
+      assert_equal [2, 3, 5], result[:breakpoint]
+      assert_equal [2, 3], result[:gone], "a breakpoint that's gone keeps nothing traced"
+      # Ruby traces the method again when a TracePoint goes, so only the
+      # breakpoint's line says whether it still counts.
+      refute_includes result[:one_shot], 5, "a breakpoint that turned itself off keeps nothing traced"
+    end
+
+    def test_a_tracepoint_aimed_at_a_method_hears_every_run_of_its_lines
+      result = in_subprocess(<<~RUBY)
+        File.write("\#{root}/aimed.rb", #{BREAKPOINT.dump})
+        load "\#{root}/aimed.rb"
+        heard = []
+        TracePoint.new(:line) { |tp| heard << tp.lineno }.enable(target: TracerBreakpoint.method(:go)) do
+          Riptide::Tracer.open_window
+          3.times { TracerBreakpoint.go }
+          { window: Riptide::Tracer.close_window.lines.fetch("aimed.rb"), heard: heard }
+        end
+      RUBY
+
+      assert_equal [3, 4, 5] * 3, result[:heard]
+      assert_equal [2, 3, 4, 5], result[:window]
+    end
+
     # The VM's own trace hooks only show what YJIT would skip in a process
     # where YJIT compiles everything it can, from the first call.
     def test_yjit_compiling_the_callers_never_hides_a_line
