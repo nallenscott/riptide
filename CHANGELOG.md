@@ -23,6 +23,8 @@
 - Tests that share a name, like specs with the same describe and it text, always run
 - Failures stay open until a later build passes the test, and a publish that fails keeps the logs for the next one
 - `riptide publish --retained-runs` sets how many runs each test keeps
+- Installing builds the tracer against Ruby's source at the running Ruby's revision, downloaded from GitHub or read from `RIPTIDE_RUBY_SOURCE`, which doesn't have to be built
+- A Ruby missing a function the tracer calls leaves riptide off instead of crashing the test process
 - `RIPTIDE_TRACER=on` builds the tracer on a Ruby it isn't written for yet, and `RIPTIDE_TRACER=off` builds without it
 - Deleting a test file drops its runs and open failures
 - Main and release branches harvest the pull requests that landed, found with `git merge-tree`, and delete their units, along with any idle for 30 days
