@@ -60,7 +60,7 @@ A test that failed keeps running until a later build passes it, so a failure rip
 - A new method a test only probed with `respond_to?` or `try`.
 - State a class body writes into another class, like registering itself with a registry, read through that other class.
 - State one test or test class leaves behind for a later one, like an `after_all` changing what the next class sees.
-- An app class a test only uses through gem code that names it, when none of the class's code runs.
+- An app constant only gem code reads, like a gem calling `Card.limit` where `limit` is gem code too.
 - `defined?(Foo)` and failed lexical constant reads. Lookups through `const_get` and `const_defined?` are covered.
 - Assets a browser loads during a system test. List them in `fallback_patterns` for suites that drive a browser.
 

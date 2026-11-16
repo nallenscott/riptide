@@ -422,6 +422,19 @@ module Riptide
       assert_selected scenario(files: { "app/g_card.rb" => card }, body: -> { ScenarioGem.limit_for("GCard") }, edits: { "app/g_card.rb" => card.sub("@limit = 5", "@limit = 6") })
     end
 
+    # Like a gem's controller subclassing ApplicationController, found by
+    # name when a request routes to it.
+    GEM_SUBCLASS = File.join(Dir.tmpdir, "riptide-scenario-gem-subclass.rb")
+    DSL = File.join(Dir.tmpdir, "riptide-scenario-dsl.rb")
+
+    def test_a_setting_an_app_class_passes_down_to_a_gem_subclass
+      File.write(DSL, "class ScenarioDsl\n  def self.setting(value = nil) = value ? (@setting = value) : (@setting || superclass.setting)\nend\n")
+      require DSL
+      File.write(GEM_SUBCLASS, "class GemCtl < AppBaseCtl\nend\n")
+      base = "class AppBaseCtl < ScenarioDsl\n  setting :app\nend\n"
+      assert_selected scenario(files: { "app/app_base_ctl.rb" => base }, body: -> { load GEM_SUBCLASS; Object.const_get("GemCtl").setting }, edits: { "app/app_base_ctl.rb" => base.sub(":app", ":other") })
+    end
+
     # And the other direction: edits that can't change the test leave it
     # skipped.
 
