@@ -86,7 +86,7 @@ module Riptide
       assert_equal %w[RecorderCard#go RecorderCard.prepare], card["methods"].sort
       assert_includes card["constants"], "RecorderCard::LIMIT"
       assert run.passed
-      assert_equal Store.set_id(PROCESS.call), run.sets.first
+      assert_equal Store.set_id(PROCESS.call, "process"), run.sets.first
       concern = run.sets.drop(1).map { |id| logged_set(id) }.find { |files| files.key?(@concern) }
       assert_includes concern.fetch(@concern)["owners"], "RecorderCard"
       refute run.inputs.key?(@concern), "what a class's loading ran lives in its shared set, not the run"
@@ -252,6 +252,9 @@ module Riptide
       end
       class_set = recorded(%w[RecorderScopedTest test_a]).first.sets.map { |id| logged_set(id) }.find { |files| files.dig("recorder/scoped.rb", "methods")&.include?("RecorderScoped.entry") }
       assert_includes class_set.dig("recorder/scoped.rb", "methods"), "RecorderScoped.before", "one scope for the class, however many of its hooks it went through"
+      scopes = recorded(%w[RecorderScopedTest test_a]).first.sets.map { |id| logged("set").find { |set| set["id"] == id }["scope"] }
+      assert_equal "process", scopes.first
+      assert_includes scopes.drop(1), "class"
       refute recorded(%w[RecorderPlainTest test_c]).first.sets.drop(1).map { |id| logged_set(id) }.any?(&:empty?), "a class that set nothing up adds no set"
       later = methods_of(%w[RecorderPlainTest test_c])
       assert_includes later, "RecorderScoped.during"

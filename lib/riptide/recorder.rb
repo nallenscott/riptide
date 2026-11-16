@@ -66,7 +66,7 @@ module Riptide
       @inputs = inputs
       @written_sets = Set.new
       @warned = Set.new
-      @scopes = [Scope.new { |trace, window| [share(process.call(trace, window))] }]
+      @scopes = [Scope.new { |trace, window| [share(process.call(trace, window), scope: "process")] }]
       @open = Set.new.compare_by_identity
       @lock = Mutex.new
       @owner = nil
@@ -122,7 +122,7 @@ module Riptide
         next [] if trace.lines.empty? && trace.receivers.empty? && !window.gathered?
 
         inputs, owner_sets = @inputs.for_test(trace, window)
-        [inputs, *owner_sets.values].reject(&:empty?).map { |files| share(files) }
+        [inputs, *owner_sets.values].reject(&:empty?).map { |files| share(files, scope: "class") }
       end
       Tracer.open_window
       Collectors.open
@@ -254,9 +254,10 @@ module Riptide
       nil
     end
 
-    def share(files)
-      id = Store.set_id(files)
-      @store.append_set(id, files) if @written_sets.add?(id)
+    # +scope+ says which setup a set came from, nil for a class a test used.
+    def share(files, scope: nil)
+      id = Store.set_id(files, scope)
+      @store.append_set(id, files, scope: scope) if @written_sets.add?(id)
       id
     end
   end

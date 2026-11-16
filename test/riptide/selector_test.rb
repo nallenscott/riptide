@@ -35,10 +35,13 @@ module Riptide
 
     def sha = Diff.blob_sha(File.join(@root, "app/widget.rb"))
 
-    def record(facets = { "methods" => ["Widget#limit"] }, test: TEST, passed: true, at: 1.0, env: {})
-      env_set = Store.set_id(env)
-      @store.append_set(env_set, env)
-      @store.append_run(Store::Run.new(test: test, at: at, passed: passed, sets: [env_set],
+    # +env+ is what the process's setup recorded, +setup+ what the test
+    # class's did.
+    def record(facets = { "methods" => ["Widget#limit"] }, test: TEST, passed: true, at: 1.0, env: {}, setup: nil)
+      sets = [["process", env], (["class", setup] if setup)].compact.map do |scope, files|
+        Store.set_id(files, scope).tap { |id| @store.append_set(id, files, scope: scope) }
+      end
+      @store.append_run(Store::Run.new(test: test, at: at, passed: passed, sets: sets,
                                        inputs: { "app/widget.rb" => { "sha" => sha }.merge(facets) }))
     end
 
@@ -53,8 +56,8 @@ module Riptide
       inputs = Inputs.new(layout: Layout.new(root: @root), files: Git.new(@root).files, source_patterns: source_patterns)
       if process
         env = inputs.for_process({}, Set.new(tables))
-        @store.append_set(Store.set_id(env), env)
-        @store.append_run(Store::Run.new(test: test, at: 1.0, passed: true, sets: [Store.set_id(env)], inputs: {}))
+        @store.append_set(Store.set_id(env, "process"), env, scope: "process")
+        @store.append_run(Store::Run.new(test: test, at: 1.0, passed: true, sets: [Store.set_id(env, "process")], inputs: {}))
       else
         window = Collectors::Window.blank.tap { |blank| blank.tables.merge(tables) }
         files, sets = inputs.for_test(Struct.new(:lines, :receivers).new({}, []), window)
@@ -63,12 +66,92 @@ module Riptide
     end
 
     # +listings+ stands in for what recorded globs match now.
-    def reasons(tests = [TEST], listings: {})
+    def decision(tests = [TEST], listings: {}, fallback: [])
       layout = Layout.new(root: @root)
       analyzer = Analyzer.new(layout: layout, blobs: @store.method(:read_blob), load_facts: @store.method(:load_facts))
       inputs = Inputs.new(layout: layout, files: Git.new(@root).files)
       pseudo = ->(key) { listings.fetch(key) { inputs.pseudo(key) } }
-      Selector.new(indexes: @store.indexes, analyzer: analyzer, root: @root, tests: tests, pseudo: pseudo).select.selected.map { |entry| entry[:reason] }
+      Selector.new(indexes: @store.indexes, analyzer: analyzer, root: @root, tests: tests, pseudo: pseudo, fallback: fallback).select
+    end
+
+    def reasons(tests = [TEST], **options) = decision(tests, **options).selected.map { |entry| entry[:reason] }
+
+    # { test => [change, through] } from the plan.
+    def explained(tests, **options)
+      decision(tests, **options).to_h["selected"].to_h { |entry| [entry["test"], entry.values_at("change", "through")] }
+    end
+
+    BOOT = %w[WidgetTest test_boot].freeze
+    SETUP = %w[WidgetTest test_setup].freeze
+
+    def test_a_selection_says_how_a_change_reached_each_test
+      with_widget do
+        limit = { "app/widget.rb" => { "sha" => sha, "methods" => ["Widget#limit"] } }
+        record
+        record({}, test: BOOT, env: limit)
+        record({}, test: SETUP, setup: limit)
+        edit("    LIMIT\n", "    LIMIT + 1\n")
+
+        code = Selector::KINDS[:code]
+        assert_equal({ TEST => [code, "their own runs"], BOOT => [code, "the process's setup"], SETUP => [code, "their test class's setup"] }, explained([TEST, BOOT, SETUP]))
+      end
+    end
+
+    # The test's own run is the closest way a change reaches it.
+    def test_a_change_that_reaches_a_test_two_ways_counts_its_own_run
+      with_widget do
+        record(env: { "app/widget.rb" => { "sha" => sha, "methods" => ["Widget#limit"] } })
+        edit("    LIMIT\n", "    LIMIT + 1\n")
+
+        assert_equal({ TEST => [Selector::KINDS[:code], "their own runs"] }, explained([TEST]))
+      end
+    end
+
+    def test_a_change_in_both_setups_counts_the_test_class_s
+      with_widget do
+        limit = { "app/widget.rb" => { "sha" => sha, "methods" => ["Widget#limit"] } }
+        record({}, env: limit, setup: limit)
+        edit("    LIMIT\n", "    LIMIT + 1\n")
+
+        assert_equal({ TEST => [Selector::KINDS[:code], "their test class's setup"] }, explained([TEST]))
+      end
+    end
+
+    def test_a_summary_counts_tests_by_change_and_names_the_biggest_causes
+      with_widget do
+        record
+        record({}, test: BOOT, env: { "app/widget.rb" => { "sha" => sha, "methods" => ["Widget#limit"] } })
+        record({ "constants" => ["Widget::LIMIT"] }, test: SETUP)
+        record({ "methods" => ["Widget#other"] }, test: %w[WidgetTest test_other])
+        edit("    LIMIT\n", "    LIMIT + 1\n")
+        edit("LIMIT = 5", "LIMIT = 6")
+
+        assert_equal <<~TEXT.chomp, decision([TEST, BOOT, SETUP, %w[WidgetTest test_new], %w[WidgetTest test_other]]).summary
+          4/5 tests
+            Anything inside a method or block: 2
+            A constant's value: 1
+            A test with no recorded run: 1
+            through their own runs: 2, most from app/widget.rb changed Widget#limit (1), app/widget.rb changed Widget::LIMIT (1)
+            through the process's setup: 1, most from app/widget.rb changed Widget#limit (1)
+        TEXT
+      end
+    end
+
+    def test_a_selection_tells_declarations_fallback_files_and_preloaded_files_apart
+      with_widget do
+        write_and_commit(@root, "Gemfile.lock", "old\n", message: "lock")
+        write_and_commit(@root, "test/test_helper.rb", "X = 1\n", message: "helper")
+        whole = ->(path) { { path => { "sha" => Diff.blob_sha(File.join(@root, path)), "whole" => true } } }
+        record({ "owners" => ["Widget"] })
+        record({}, test: BOOT, env: whole.("Gemfile.lock"))
+        record({}, test: SETUP, env: whole.("test/test_helper.rb"))
+        edit("  LIMIT = 5\n", "  LIMIT = 5\n  validates :name\n")
+        File.write(File.join(@root, "Gemfile.lock"), "new\n")
+        File.write(File.join(@root, "test/test_helper.rb"), "X = 2\n")
+
+        assert_equal({ TEST => [Selector::KINDS[:declaration], "their own runs"], BOOT => [Selector::KINDS[:fallback], "the process's setup"],
+                       SETUP => [Selector::KINDS[:preloaded], "the process's setup"] }, explained([TEST, BOOT, SETUP], fallback: ["Gemfile.lock"]))
+      end
     end
 
     def test_a_test_with_no_recorded_run_is_selected

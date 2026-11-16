@@ -62,7 +62,7 @@ module Riptide
           if @old.methods.key?(unit.name)
             method_changed(unit.name)
           elsif @new.methods[unit.name].includers || @old.declares?(unit.owner, unit.name[/[#.](.+)\z/, 1]) || @overrides.call(unit.name)
-            @change.owners.merge(@new.names_for(unit.owner))
+            @change.owned(@new.names_for(unit.owner), :override)
           end
         when :block_body then new_block(hunk, line, unit)
         when :constant
@@ -152,14 +152,14 @@ module Riptide
           next unless fact && fact["called"]
           next if block && @old.unit_at(line)&.block != block && line != block
 
-          @change.owners.merge(fact["owners"])
+          @change.owned(fact["owners"], :code)
         end
       end
 
       def statement(source, unit, added: false)
         case unit.kind
         when :constant then Array(unit.name).each { |name| added ? added_constant(name) : constant(source, name) }
-        when :declaration then @change.owners.merge(source.names_for(unit.owner))
+        when :declaration then @change.owned(source.names_for(unit.owner), :declaration)
         when :top then @change.suite!
         when :data then @change.whole!
         end

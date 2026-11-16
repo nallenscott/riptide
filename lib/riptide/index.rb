@@ -15,6 +15,8 @@ module Riptide
   #   files/<ab>            per file version, per path, its postings
   #   listings/<ab>         per glob, fixture table or absent name, its postings by value
   #   members/<ab>          per shared set, the runs that point at it
+  #   scopes                per shared set from a test class's or the process's
+  #                         setup, which of the two
   #   names/<ab>            per constant name, the runs and sets that read it
   #   manifest/<ab>         per path, its recorded versions
   #   loads/<ab>            per file version, which classes each line ran for
@@ -28,7 +30,7 @@ module Riptide
   class Index
     # Goes up whenever what a run records changes meaning, like how a method
     # is named, so older runs read as none and their tests run once.
-    FORMAT = 4
+    FORMAT = 5
     FACETS = %w[methods blocks owners tables].freeze
 
     Run = Struct.new(:id, :test, :at, keyword_init: true)
@@ -96,6 +98,24 @@ module Riptide
       end
     end
 
+    # "class" or "process" for a set from a test class's or the process's
+    # setup, nil for a run or a class the test used.
+    def scope(id) = (blob("scopes") || {})[id.to_s]
+
+    # { run id => how +holders+ reach it }: :test through the run or a class
+    # it used, otherwise :class or :process for a setup's set. A run reached
+    # more than one way counts the closest.
+    def reach(holders)
+      holders.each_with_object({}) do |id, result|
+        if run_ids.include?(id)
+          result[id] = :test
+        else
+          via = scope(id)&.to_sym || :test
+          members(id).each { |run| result[run] = closer(result[run], via) }
+        end
+      end
+    end
+
     def members(set_id)
       @members[set_id] ||= Index.ids(blob("members/#{Index.id_shard(set_id)}")&.fetch(set_id.to_s, nil) || [])
     end
@@ -112,6 +132,10 @@ module Riptide
         run_ids.include?(id) ? result << id : result.merge(members(id))
       end
     end
+
+    REACH = %i[test class process].freeze
+
+    def closer(one, other) = [one, other].compact.min_by { |via| REACH.index(via) }
 
     def load_facts(sha) = blob("loads/#{sha[0, 2]}")&.fetch(sha, nil)
 
@@ -141,12 +165,13 @@ module Riptide
     # The forward form of an index, for publishing to change: runs and sets
     # by id, each with the files it recorded and the constants it read.
     class Model
-      Holder = Struct.new(:test, :at, :sets, :files, :constants, keyword_init: true) do
+      Holder = Struct.new(:test, :at, :sets, :files, :constants, :scope, keyword_init: true) do
         def run? = !test.nil?
 
-        # What the run or set depended on directly. Two runs with the same
-        # key and the same sets get selected the same way.
-        def key = @key ||= Digest::SHA1.hexdigest(JSON.generate([files, constants.sort]))
+        # What the run or set depended on directly, and where a set came
+        # from. Two runs with the same key and the same sets get selected
+        # the same way.
+        def key = @key ||= Digest::SHA1.hexdigest(JSON.generate([files, constants.sort, scope]))
       end
 
       attr_reader :holders, :loads, :pins, :test_files
@@ -172,9 +197,10 @@ module Riptide
       def set(id) = @holders.fetch(id)
       def runs = @tests.transform_values { |ids| ids.map { |id| [id, @holders[id]] } }
 
-      # The id of a set with these files, adding it when it's new.
-      def add_set(files, constants)
-        holder = Holder.new(files: canonical(files), constants: constants.to_set)
+      # The id of a set with these files, adding it when it's new. +scope+
+      # is "class" or "process" for a setup's set.
+      def add_set(files, constants, scope: nil)
+        holder = Holder.new(files: canonical(files), constants: constants.to_set, scope: scope)
         @set_ids[holder.key] ||= add(holder)
       end
 
@@ -253,6 +279,8 @@ module Riptide
           (content["tests/#{Index.shard(Index.test_key(test))}"] ||= []) << [*test, @test_files[test], runs]
         end
         members.each { |id, runs| (content["members/#{Index.id_shard(id)}"] ||= {})[id.to_s] = Index.gaps(runs) }
+        scopes = @holders.filter_map { |id, holder| [id.to_s, holder.scope] if holder.scope }.sort.to_h
+        content["scopes"] = scopes unless scopes.empty?
         names.each { |name, ids| (content["names/#{Index.shard(name)}"] ||= {})[name] = Index.gaps(ids) }
         @loads.each { |sha, lines| (content["loads/#{sha[0, 2]}"] ||= {})[sha] = lines.sort_by { |line, _| line.to_i }.to_h }
         manifest.each { |path, versions| (content["manifest/#{Index.shard(path)}"] ||= {})[path] = versions.sort }
@@ -291,6 +319,7 @@ module Riptide
         index.each_blob("listings/") do |_, by_path|
           by_path.each { |file, values| values.each { |value, posting| add_postings(holders, file, value, posting) } }
         end
+        (index.blob("scopes") || {}).each { |id, scope| holders[id.to_i].scope = scope }
         loads = {}
         index.each_blob("loads/") { |_, by_sha| loads.merge!(by_sha) }
         holders.default_proc = nil

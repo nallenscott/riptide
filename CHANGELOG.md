@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 - Rebuilt around recorded runs keyed by git blob sha, with selection against the working tree instead of a diff base
+- A selection says how many tests each kind of change selected, and whether a change reached them through their own runs, their test class's setup or the process's setup, with the biggest causes of each. The plan says it per test
 - A tracer that sees classes load, so load-time code belongs to the classes it ran for
 - A class body left without reaching its end, through an error, a `throw` or its thread dying, stops counting as loading once its frame is gone
 - The tracer hooks the VM's trace instructions in app code only, so YJIT keeps everything it compiled, and each line costs a test one hit however often it runs

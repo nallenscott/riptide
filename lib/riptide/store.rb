@@ -62,7 +62,7 @@ module Riptide
 
     # A set's id in the logs comes from its content, so tests sharing a
     # class share one.
-    def self.set_id(files) = Digest::SHA1.hexdigest(JSON.generate(files.sort.to_h))[0, 16]
+    def self.set_id(files, scope = nil) = Digest::SHA1.hexdigest(JSON.generate([files.sort.to_h, scope].compact))[0, 16]
 
     # One ref segment per name, so feature/a can't nest under feature.
     def self.escape(name) = name.gsub("%", "%25").gsub("/", "%2F")
@@ -121,7 +121,8 @@ module Riptide
 
     def append_start(test) = write_record({ "type" => "start", "test" => test, "at" => Time.now.to_f })
     def append_run(run) = write_record({ "type" => "run" }.merge(run.to_h.transform_keys(&:to_s)))
-    def append_set(id, files) = write_record({ "type" => "set", "id" => id, "files" => files })
+    # +scope+ is "class" or "process" for a setup's set.
+    def append_set(id, files, scope: nil) = write_record({ "type" => "set", "id" => id, "files" => files, "scope" => scope }.compact)
     def append_load_facts(sha, lines) = write_record({ "type" => "load", "sha" => sha, "lines" => lines })
 
     # The tests this process's selection picked. A test it skipped already
@@ -275,7 +276,7 @@ module Riptide
     # saw at fetch. A failure, or a test that
     # started and never finished, opens one. Returns how many runs it added.
     def fold(model, marks, files, records, seen)
-      sets = records.select { |record| record["type"] == "set" }.to_h { |record| [record["id"], record["files"]] }
+      sets = records.select { |record| record["type"] == "set" }.to_h { |record| [record["id"], record] }
       decided = records.select { |record| record["type"] == "selected" }
       picked = decided.flat_map { |record| record["tests"] }.to_set
       ids = {}
@@ -300,7 +301,7 @@ module Riptide
         next unless record["inputs"]
         next if decided.any? && !picked.include?(test)
 
-        set_ids = record["sets"].map { |id| ids[id] ||= sets[id] && model.add_set(*Index::Model.split(sets[id])) }
+        set_ids = record["sets"].map { |id| ids[id] ||= sets[id] && model.add_set(*Index::Model.split(sets[id]["files"]), scope: sets[id]["scope"]) }
         # A run whose shared set the logs lost can't be checked against anything.
         next if set_ids.include?(nil)
 

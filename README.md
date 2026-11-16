@@ -37,13 +37,16 @@ When a file differs from the version a test recorded, riptide works out what cha
 | A constant's value | The tests that read it, including through `self.class::LIMIT` or `const_get(:LIMIT)` |
 | A declaration, like `belongs_to`, `validates` or `scope` | The tests that used the class |
 | A new method that could take over a call, from an ancestor, an attribute, `method_missing`, another file reopening the class, or a core class like `String` | The tests that used the class |
-| A table in `db/structure.sql` or `db/schema.rb`, or its fixtures, including a fixture file added, deleted or moved to another model | The tests that touched the table, plus for a foreign key the tests that touched the table it points at |
+| A table or its fixtures, in `db/structure.sql` or `db/schema.rb`, including a fixture file added, deleted or moved to another model | The tests that touched the table, plus for a foreign key the tests that touched the table it points at |
 | A file a test read, a directory it listed, or a name it found missing that now exists | The tests that did that |
 | A file in `fallback_patterns`, like `Gemfile.lock` or an initializer | Every test |
+| A file that loaded before riptide started, like the test helper | Every test |
 | Top-level code that runs at boot, or code a parallel worker runs before its tests | Every test after it |
 | Code a test class runs before its tests, like a `before_all` | That class's tests |
 | A deleted file, or a recorded version git no longer has | The tests that recorded it |
 | Comments, blank lines, and methods reordered without crossing a class-level line like `private` | Nothing |
+
+Dry run and enforce print how many tests each row selected, then, for each way a change reached tests, through their own runs, their test class's setup or the process's setup, the reasons behind the most. `plan_path` gets the same per test.
 
 A test that failed keeps running until a later build passes it, so a failure riptide can't trace back to code, like a flaky test, still reruns. A test with no recorded run always runs, and so do tests that share a name, like specs with the same `describe` and `it` text, since their runs can't be told apart.
 

@@ -176,7 +176,7 @@ module Riptide
       change = changes(text, moved, overrides: ->(name) { name == "Bill#total" })
 
       assert_includes change.methods, "Card#total"
-      assert_equal ["Bill"], change.owners.to_a
+      assert_equal({ "Bill" => :override }, change.causes)
     end
 
     def test_reordering_methods_in_a_block_changes_them
@@ -195,7 +195,7 @@ module Riptide
     def test_adding_a_method_that_overrides_one_changes_the_owner
       change = ruby("  def noop; end\n", "  def noop; end\n\n  def to_s\n    :card\n  end\n", overrides: ->(name) { name == "Card#to_s" })
 
-      assert_equal ["Card"], change.owners.to_a
+      assert_equal({ "Card" => :override }, change.causes)
     end
 
     # Calling an empty method still fires its call event, so a test that
@@ -248,7 +248,7 @@ module Riptide
       change = ruby("where(primary: true)", "where(primary: false)", facts: ran)
 
       assert_equal [6], change.blocks.to_a
-      assert_equal ["Card"], change.owners.to_a
+      assert_equal({ "Card" => :code }, change.causes)
     end
 
     def test_a_block_with_no_load_facts_falls_back_to_the_owner
@@ -260,7 +260,7 @@ module Riptide
     def test_a_declaration_edit_changes_the_owner
       change = ruby("belongs_to :user", "belongs_to :user, optional: true", facts: {})
 
-      assert_equal ["Card"], change.owners.to_a
+      assert_equal({ "Card" => :declaration }, change.causes)
     end
 
     def test_a_method_that_ran_at_load_changes_itself_and_the_classes_it_ran_for

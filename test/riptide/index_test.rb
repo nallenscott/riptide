@@ -13,18 +13,21 @@ module Riptide
 
     def test_a_model_survives_a_round_trip_through_the_tree
       model = Model.new
-      env = model.add_set({ "Gemfile.lock" => { "sha" => "g1", "whole" => true }, "glob:config/**/*" => { "sha" => "l1" } }, ["Rails"])
+      env = model.add_set({ "Gemfile.lock" => { "sha" => "g1", "whole" => true }, "glob:config/**/*" => { "sha" => "l1" } }, ["Rails"], scope: "process")
       owner = model.add_set({ "app/card.rb" => { "sha" => "c1", "owners" => ["Card"] } }, [])
+      setup = model.add_set({ "app/card.rb" => { "sha" => "c1", "owners" => ["Card"] } }, [], scope: "class")
       empty = model.add_set({}, [])
-      model.add_run(test: %w[CardTest test_a], at: 2.0, sets: [env, owner, empty], file: "test/card_test.rb",
+      model.add_run(test: %w[CardTest test_a], at: 2.0, sets: [env, owner, setup, empty], file: "test/card_test.rb",
                     files: { "app/card.rb" => { "sha" => "c1", "methods" => ["Card#b", "Card#a"], "blocks" => [12, 3] },
                              "const:Card Missing" => { "sha" => "absent" } },
                     constants: ["Card::LIMIT", "*::NAME"])
       model.add_run(test: %w[CardTest test_a], at: 1.0, sets: [env], files: {}, constants: [])
       model.merge_loads("c1", { "3" => { "owners" => ["Card"], "called" => false } })
 
-      decoded = Index.of(model.encode).model
+      index = Index.of(model.encode)
+      decoded = index.model
 
+      assert_equal [["process", "class"], [nil, nil]], [[index.scope(env), index.scope(setup)], [index.scope(owner), index.scope(empty)]]
       assert_equal model.holders.transform_values(&:to_h), decoded.holders.transform_values(&:to_h)
       assert_equal model.loads, decoded.loads
       assert_equal({ %w[CardTest test_a] => "test/card_test.rb" }, decoded.test_files)
@@ -121,7 +124,11 @@ module Riptide
           elsif roll < 0.04 then change.tap(&:suite!)
           elsif roll < 0.1 then change.tap(&:whole!)
           else
-            Index::FACETS.each { |facet| change.public_send(facet) << value(facet) if @random.rand < 0.3 }
+            Index::FACETS.each do |facet|
+              next unless @random.rand < 0.3
+
+              facet == "owners" ? change.owned([value(facet)], :declaration) : change.public_send(facet) << value(facet)
+            end
             change.constants << NAMES.sample(random: @random) if @random.rand < 0.3
             change
           end
