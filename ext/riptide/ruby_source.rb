@@ -1,10 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
-require "net/http"
-require "rubygems/package"
-require "stringio"
-require "zlib"
+require "open3"
 
 # The tracer reaches into the VM, so it builds against the internal headers of
 # the exact Ruby it runs on. Ruby doesn't install those, so they come from
@@ -12,13 +9,18 @@ require "zlib"
 # while it builds generated the same way. RIPTIDE_RUBY_SOURCE points at a
 # source tree instead, for a build with no way out to GitHub.
 module RubySource
+  REPOSITORY = "https://github.com/ruby/ruby.git"
   # What the headers and the generators for the missing ones need.
-  KEEP = %r{\A(?:[^/]+\.h|(?:internal|ccan|prism)/.*|(?:tool|template|defs)/.*)\z}
+  PATHS = %w[/*.h /internal/ /ccan/ /prism/ /tool/ /template/ /defs/].freeze
   GENERATED = {
     "id.h" => ->(out) { ["tool/generic_erb.rb", "--output=#{out}", "template/id.h.tmpl"] },
     "prism/ast.h" => ->(out) { ["prism/templates/template.rb", "include/prism/ast.h", out] },
     "prism/diagnostic.h" => ->(out) { ["prism/templates/template.rb", "include/prism/diagnostic.h", out] }
   }.freeze
+  # Only what's asked for here decides how git behaves, so a user's config
+  # can't change the fetch. A fetch that stalls gives up after a minute.
+  GIT_ENV = { "GIT_CONFIG_GLOBAL" => File::NULL, "GIT_CONFIG_NOSYSTEM" => "1", "GIT_TERMINAL_PROMPT" => "0" }.freeze
+  GIT_CONFIG = %w[-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60].freeze
 
   module_function
 
@@ -35,50 +37,34 @@ module RubySource
 
   # The tree only gets its name once it's complete, so a build that died
   # partway through starts over instead of building against half of it.
-  def downloaded
+  def downloaded(revision: RUBY_REVISION, repository: REPOSITORY)
     # A full commit sha pins the exact source this Ruby was built from.
-    raise "no full revision for this Ruby: #{RUBY_REVISION}" unless RUBY_REVISION.match?(/\A\h{40}\z/)
+    raise "no full revision for this Ruby: #{revision}" unless revision.match?(/\A\h{40}\z/)
 
-    dir = File.expand_path("ruby-#{RUBY_REVISION}")
+    dir = File.expand_path("ruby-#{revision}")
     return dir if File.directory?(dir)
 
     partial = "#{dir}.partial"
     FileUtils.rm_rf(partial)
-    extract(download("https://github.com/ruby/ruby/archive/#{RUBY_REVISION}.tar.gz"), partial)
+    fetch(repository, revision, partial)
     generate(partial, partial)
     File.rename(partial, dir)
     dir
   end
 
-  def download(url, redirects = 5)
-    uri = URI(url)
-    raise "won't download from #{url}" unless uri.scheme == "https" && %w[github.com codeload.github.com].include?(uri.host)
-
-    response = Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 15, read_timeout: 60) { |http| http.get(uri.request_uri) }
-    case response
-    when Net::HTTPRedirection
-      raise "too many redirects from #{url}" if redirects.zero?
-
-      download(response["location"], redirects - 1)
-    when Net::HTTPSuccess then response.body
-    else raise "#{url} answered #{response.code}"
-    end
+  # Checks out only PATHS at +revision+, fetching just that commit and the
+  # files it needs.
+  def fetch(repository, revision, dir)
+    git("init", "-q", dir)
+    git("-C", dir, "sparse-checkout", "set", "--no-cone", *PATHS)
+    git("-C", dir, "fetch", "-q", "--depth", "1", "--filter=blob:none", repository, revision)
+    git("-C", dir, "checkout", "-q", "FETCH_HEAD")
+    FileUtils.rm_rf(File.join(dir, ".git"))
   end
 
-  def extract(archive, dir)
-    Gem::Package::TarReader.new(Zlib::GzipReader.new(StringIO.new(archive))) do |tar|
-      tar.each do |entry|
-        next unless entry.file?
-
-        relative = entry.full_name.split("/", 2)[1]
-        next unless relative&.match?(KEEP)
-        raise "Ruby's source archive has a path that leaves it: #{entry.full_name}" if relative.split("/").include?("..")
-
-        path = File.join(dir, relative)
-        FileUtils.mkdir_p(File.dirname(path))
-        File.binwrite(path, entry.read)
-      end
-    end
+  def git(*args)
+    output, status = Open3.capture2e(GIT_ENV, "git", *GIT_CONFIG, *args)
+    raise "couldn't get Ruby's source: #{output.lines.last&.strip}" unless status.success?
   end
 
   # Writes the headers +source+ is missing into +out+, with the generators

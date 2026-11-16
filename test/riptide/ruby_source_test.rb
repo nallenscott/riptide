@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require "minitest/mock"
 require "rbconfig"
 require_relative "../../ext/riptide/ruby_source"
 
@@ -18,101 +17,116 @@ module Riptide
       found
     end
 
-    # What GitHub's archive of +tree+ holds that riptide keeps: everything but
-    # the headers Ruby's build generates. vm_core.h comes first.
+    # The files in +tree+ that riptide checks out: everything under PATHS
+    # but the headers Ruby's build generates.
     def kept_files
-      files = Dir.glob("**/*", base: tree).select { |f| f.match?(RubySource::KEEP) && File.file?(File.join(tree, f)) }
-      (files - RubySource::GENERATED.keys).sort_by { |f| [f == "vm_core.h" ? 0 : 1, f] }
-    end
-
-    def archive(files = kept_files, &each)
-      io = StringIO.new
-      gz = Zlib::GzipWriter.new(io)
-      Gem::Package::TarWriter.new(gz) do |tar|
-        files.each do |f|
-          body = each ? each.(f) : File.binread(File.join(tree, f))
-          tar.add_file_simple("ruby-#{RUBY_REVISION}/#{f}", 0o644, body.bytesize) { |out| out.write(body) }
-        end
+      dirs, files = RubySource::PATHS.map { |path| path.delete_prefix("/") }.partition { |path| path.end_with?("/") }
+      Dir.glob("**/*", base: tree).select do |f|
+        File.file?(File.join(tree, f)) && !RubySource::GENERATED.key?(f) &&
+          (dirs.any? { |dir| f.start_with?(dir) } || files.any? { |glob| File.fnmatch?(glob, f, File::FNM_PATHNAME) })
       end
-      gz.close
-      io.string
     end
 
-    def downloaded_from(archive)
-      RubySource.stub(:download, archive) { RubySource.downloaded }
+    # A repository holding +files+ from +tree+ in one commit, plus +extra+
+    # files by content, served the way GitHub serves Ruby's. Returns its URL
+    # and the commit's sha.
+    def origin(dir, files = kept_files, extra: {})
+      repo = File.join(dir, "origin-#{files.size}")
+      files.each do |f|
+        FileUtils.mkdir_p(File.dirname(File.join(repo, f)))
+        FileUtils.cp(File.join(tree, f), File.join(repo, f))
+      end
+      extra.each do |f, content|
+        FileUtils.mkdir_p(File.dirname(File.join(repo, f)))
+        File.write(File.join(repo, f), content)
+      end
+      git = ->(*args) { system("git", "-C", repo, *args, exception: true, out: File::NULL) }
+      git.("init", "-q")
+      git.("config", "uploadpack.allowFilter", "true")
+      git.("config", "uploadpack.allowAnySHA1InWant", "true")
+      git.("add", "-A")
+      git.("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ruby")
+      ["file://#{repo}", IO.popen(["git", "-C", repo, "rev-parse", "HEAD"], &:read).strip]
     end
 
     def in_build_dir(&block)
-      Dir.mktmpdir { |dir| Dir.chdir(dir, &block) }
+      Dir.mktmpdir { |dir| Dir.chdir(dir) { block.call(dir) } }
     end
 
-    # A copy of +tree+ without the headers Ruby generates, that nothing can
-    # write to.
-    def bare_tree(dir)
+    # Yields a copy of +tree+ without the headers Ruby generates, that
+    # nothing can write to, and makes it writable again so it can be removed.
+    def with_bare_tree(dir)
       bare = File.join(dir, "bare")
       kept_files.each do |f|
         FileUtils.mkdir_p(File.dirname(File.join(bare, f)))
         FileUtils.cp(File.join(tree, f), File.join(bare, f))
       end
       FileUtils.chmod_R("a-w", bare)
-      bare
+      yield bare
+    ensure
+      FileUtils.chmod_R("u+w", bare) if File.exist?(bare)
     end
 
-    def writable(dir)
-      FileUtils.chmod_R("u+w", dir) if File.exist?(dir)
-    end
+    def test_a_download_checks_out_the_source_and_generates_the_headers_ruby_generates
+      in_build_dir do |dir|
+        url, sha = origin(dir, extra: { "lib/unused.rb" => "x = 1\n", "ext/unused.h" => "int x;\n" })
+        downloaded = RubySource.downloaded(revision: sha, repository: url)
 
-    def test_a_download_generates_the_headers_ruby_generates
-      in_build_dir do
-        dir = downloaded_from(archive)
-
-        assert_equal File.expand_path("ruby-#{RUBY_REVISION}"), dir
-        RubySource::GENERATED.each_key { |header| assert_equal File.binread(File.join(tree, header)), File.binread(File.join(dir, header)), header }
+        assert_equal File.expand_path("ruby-#{sha}"), downloaded
+        assert_empty kept_files.reject { |f| File.exist?(File.join(downloaded, f)) }
+        refute File.exist?(File.join(downloaded, "lib/unused.rb")), "only the paths the headers need are checked out"
+        refute File.exist?(File.join(downloaded, "ext/unused.h"))
+        RubySource::GENERATED.each_key { |header| assert_equal File.binread(File.join(tree, header)), File.binread(File.join(downloaded, header)), header }
+        refute File.exist?(File.join(downloaded, ".git"))
       end
     end
 
-    def test_a_download_that_dies_partway_starts_over
-      in_build_dir do
-        whole = archive
-        assert_raises(Zlib::Error) { downloaded_from(whole.byteslice(0, whole.bytesize / 2)) }
-        refute File.exist?("ruby-#{RUBY_REVISION}")
-
-        dir = downloaded_from(whole)
-        assert_empty kept_files.reject { |f| File.exist?(File.join(dir, f)) }
-      end
-    end
-
-    def test_a_download_whose_headers_fail_to_generate_starts_over
-      in_build_dir do
-        capture_subprocess_io { assert_raises(RuntimeError) { downloaded_from(archive(kept_files - ["template/id.h.tmpl"])) } }
-        refute File.exist?("ruby-#{RUBY_REVISION}")
+    def test_a_download_that_fails_partway_starts_over
+      in_build_dir do |dir|
+        url, sha = origin(dir)
+        error = assert_raises(RuntimeError) { RubySource.downloaded(revision: sha, repository: "file://#{dir}/nowhere") }
+        assert_match(/couldn't get Ruby's source/, error.message)
+        refute File.exist?("ruby-#{sha}")
 
         # A generator killed partway through its header.
-        File.write("ruby-#{RUBY_REVISION}.partial/id.h", "#ifndef RUBY_ID_H\n")
-        assert_equal File.binread(File.join(tree, "id.h")), File.binread(File.join(downloaded_from(archive), "id.h"))
+        File.write("ruby-#{sha}.partial/id.h", "#ifndef RUBY_ID_H\n")
+        assert_equal File.binread(File.join(tree, "id.h")), File.binread(File.join(RubySource.downloaded(revision: sha, repository: url), "id.h"))
       end
     end
 
-    def test_an_archive_path_that_leaves_the_tree_is_refused
-      in_build_dir do
-        escaping = archive(["internal/../../escaped.h"]) { "int x;\n" }
+    # A user's git config, like a URL rewrite, can't send the fetch
+    # somewhere else.
+    def test_a_download_ignores_the_user_s_git_config
+      in_build_dir do |dir|
+        url, sha = origin(dir)
+        config = File.join(dir, "gitconfig")
+        File.write(config, "[url \"file://#{dir}/nowhere/\"]\n\tinsteadOf = #{url}\n")
+        previous = ENV["GIT_CONFIG_GLOBAL"]
+        ENV["GIT_CONFIG_GLOBAL"] = config
 
-        error = assert_raises(RuntimeError) { RubySource.extract(escaping, File.expand_path("source/out")) }
-        assert_match(/leaves it/, error.message)
-        assert_empty Dir.glob("**/escaped.h")
+        assert File.exist?(File.join(RubySource.downloaded(revision: sha, repository: url), "vm_core.h"))
+      ensure
+        ENV["GIT_CONFIG_GLOBAL"] = previous
+      end
+    end
+
+    def test_a_download_whose_headers_fail_to_generate_isnt_kept
+      in_build_dir do |dir|
+        url, sha = origin(dir, kept_files - ["template/id.h.tmpl"])
+
+        capture_subprocess_io { assert_raises(RuntimeError) { RubySource.downloaded(revision: sha, repository: url) } }
+        refute File.exist?("ruby-#{sha}")
       end
     end
 
     def test_a_given_tree_gets_the_headers_it_lacks_without_being_written_to
       in_build_dir do |dir|
-        bare = bare_tree(dir)
-
-        dirs = RubySource.include_dirs(bare)
-        assert_equal [bare, File.expand_path("ruby-generated")], dirs
-        RubySource::GENERATED.each_key { |header| assert_equal File.binread(File.join(tree, header)), File.binread(File.join(dirs.last, header)), header }
-        RubySource::GENERATED.each_key { |header| refute File.exist?(File.join(bare, header)), header }
-      ensure
-        writable(bare)
+        with_bare_tree(dir) do |bare|
+          dirs = RubySource.include_dirs(bare)
+          assert_equal [bare, File.expand_path("ruby-generated")], dirs
+          RubySource::GENERATED.each_key { |header| assert_equal File.binread(File.join(tree, header)), File.binread(File.join(dirs.last, header)), header }
+          RubySource::GENERATED.each_key { |header| refute File.exist?(File.join(bare, header)), header }
+        end
       end
     end
 
@@ -137,11 +151,7 @@ module Riptide
 
     def test_the_tracer_builds_against_a_tree_ruby_hasnt_built
       Dir.mktmpdir do |dir|
-        bare = bare_tree(dir)
-
-        assert_nil configure(dir, bare)
-      ensure
-        writable(bare)
+        with_bare_tree(dir) { |bare| assert_nil configure(dir, bare) }
       end
     end
 
