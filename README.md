@@ -102,7 +102,7 @@ Minitest 5 loads every installed plugin file by itself, so riptide does nothing 
 | `suite` | `"default"` | Names the refs runs are kept under, `refs/riptide/runs/<suite>/...`. A CI stage that runs a different slice of the tests is its own suite. |
 | `mode` | `:record` | `:record` records only. `:dry_run` also prints what it would run. `:enforce` runs only the selected tests. |
 | `fallback_patterns` | Gemfile, Gemfile.lock, config/application.rb, config/environment.rb, config/environments/test.rb, config/initializers/** | Files every test depends on as a whole. |
-| `source_patterns` | every file git knows about | Globs of the files dependencies are recorded on. |
+| `source_patterns` | every file git knows about | Globs of the files dependencies are recorded on. The schema and fixtures always count. |
 | `locale_patterns` | `config/locales/**/*` | Locale files a test that translated anything depends on. |
 | `schema_path` | `db/structure.sql` or `db/schema.rb` | The schema file, analyzed per table. |
 | `fixtures_path` | `test/fixtures` | Fixture files, analyzed per table. |

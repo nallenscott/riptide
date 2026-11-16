@@ -49,8 +49,8 @@ module Riptide
 
     # A run of +test+ that queried +tables+, recorded the way Inputs does,
     # in the test or before it in the process.
-    def record_tables(*tables, test: TEST, process: false)
-      inputs = Inputs.new(layout: Layout.new(root: @root), files: Git.new(@root).files)
+    def record_tables(*tables, test: TEST, process: false, source_patterns: [])
+      inputs = Inputs.new(layout: Layout.new(root: @root), files: Git.new(@root).files, source_patterns: source_patterns)
       if process
         env = inputs.for_process({}, Set.new(tables))
         @store.append_set(Store.set_id(env), env)
@@ -288,6 +288,24 @@ module Riptide
 
         write_and_commit(@root, "test/fixtures/cards.yml", "one:\n  id: 1\n", message: "fixture")
         assert_equal ["fixture files for cards were added or removed"], reasons
+      end
+    end
+
+    # Source patterns say where code lives. Tables are recorded on the
+    # schema and fixtures wherever those sit.
+    def test_a_table_change_selects_the_test_when_source_patterns_leave_out_the_schema_and_fixtures
+      with_widget do
+        write_and_commit(@root, "db/structure.sql", "CREATE TABLE public.cards (\n    id bigint NOT NULL\n);\n", message: "schema")
+        write_and_commit(@root, "test/fixtures/cards.yml", "one:\n  id: 1\n", message: "fixture")
+        record_tables("cards", source_patterns: ["app/**/*.rb"])
+        assert_empty reasons
+
+        File.write(File.join(@root, "db/structure.sql"), "CREATE TABLE public.cards (\n    id bigint NOT NULL,\n    limit integer\n);\n")
+        refute_empty reasons
+        system("git", "-C", @root, "checkout", "-q", "db/structure.sql", exception: true)
+
+        File.write(File.join(@root, "test/fixtures/cards.yml"), "one:\n  id: 2\n")
+        refute_empty reasons
       end
     end
 

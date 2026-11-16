@@ -17,6 +17,8 @@ module Riptide
     # which version a test ran.
     class Stale < Error; end
 
+    TABLE_KINDS = %i[sql schema fixture].freeze
+
     def initialize(layout:, files:, source_patterns: [], locale_patterns: ["config/locales/**/*"])
       @layout = layout
       @root = layout.root
@@ -142,8 +144,10 @@ module Riptide
 
     private
 
+    # Tables are recorded on the schema and fixtures, so they count wherever
+    # the source patterns point.
     def in_scope?(path)
-      @source_patterns.empty? || @source_patterns.any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME | File::FNM_EXTGLOB) }
+      TABLE_KINDS.include?(@layout.kind(path)) || @source_patterns.empty? || @source_patterns.any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME | File::FNM_EXTGLOB) }
     end
 
     def verify_unchanged(path)
