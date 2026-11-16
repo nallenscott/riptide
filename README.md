@@ -69,9 +69,9 @@ A test that failed keeps running until a later build passes it, so a failure rip
 
 ## Requirements
 
-- Ruby 4.0. riptide installs on later Rubies but stays off until its tracer is written for their VM. The tracer builds against Ruby's internal headers, which installing riptide downloads from Ruby's source on GitHub. Set `RIPTIDE_RUBY_SOURCE` to a Ruby source tree, built or not, to skip the download. riptide only reads it. `RIPTIDE_TRACER=on` builds the tracer on a Ruby it isn't written for yet, to try it there, and `RIPTIDE_TRACER=off` builds without it.
+- Ruby 4.0. riptide installs on later Rubies but stays off until its tracer is written for their VM. The tracer builds against Ruby's internal headers, which installing riptide fetches with git from Ruby's repository on GitHub, at the running Ruby's exact commit. Set `RIPTIDE_RUBY_SOURCE` to a Ruby source tree, built or not, to skip the fetch. riptide only reads it. `RIPTIDE_TRACER=on` builds the tracer on a Ruby it isn't written for yet, to try it there, and `RIPTIDE_TRACER=off` builds without it.
 - Minitest 5.26.1 or later, below 7
-- git 2.45 or later
+- git 2.45 or later, to install and to run
 
 ## Setup
 
