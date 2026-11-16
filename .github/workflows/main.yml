@@ -35,7 +35,7 @@ jobs:
         run: |
           require "json"
           require "open-uri"
-          require_relative "lib/riptide/version"
+          require File.expand_path("lib/riptide/version")
           spec = Gem::Specification.load("riptide.gemspec")
           maintained = JSON.parse(URI("https://cache.ruby-lang.org/pub/misc/ci_versions/cruby.json").read).grep(/\A\d/)
           installs = maintained.select { |minor| spec.required_ruby_version.satisfied_by?(Gem::Version.new(minor)) }
