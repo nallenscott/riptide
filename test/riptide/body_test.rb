@@ -90,6 +90,8 @@ module Riptide
       body = split.body
       assert_equal [12, 13, 14, 15], body.map(&:line)
       assert_equal [["Shop.price"], [], ["Shop.price", "Shop.tax", "Shop.total"], []], body.map { |statement| statement.set ? methods(model.set(statement.set).files).sort : [] }
+      assert_equal [[2], [], [2, 3, 7, 8], []], body.map { |statement| statement.set ? model.set(statement.set).files.fetch("app/shop.rb", {}).fetch("lines", []).sort : [] },
+                   "each statement keeps the lines it ran"
       assert_equal [0, 1, 1, 1], body.map { |statement| statement.compared.size }, "an assertion built on another counts once, and so does a mock's with"
       assert(body.all? { |statement| statement.ms >= 0 && !statement.wrote && statement.reads.empty? })
       assert_equal body.filter_map(&:set).sort, (split.sets & body.filter_map(&:set)).sort, "the statements' sets are the run's"

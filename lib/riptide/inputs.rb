@@ -171,6 +171,7 @@ module Riptide
     end
 
     def ran(entry, entries, owners, numbers, source)
+      entry["lines"] = (entry["lines"] || []) | numbers.to_a
       numbers.each do |line|
         source.blocks_starting_at(line).each { |block| add(entry, "blocks", block) }
         unit = source.unit_at(line)

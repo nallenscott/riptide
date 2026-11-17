@@ -18,7 +18,7 @@ module Riptide
       setup = model.add_set({ "app/card.rb" => { "sha" => "c1", "owners" => ["Card"] } }, [], scope: "class")
       empty = model.add_set({}, [])
       model.add_run(test: %w[CardTest test_a], at: 2.0, sets: [env, owner, setup, empty], file: "test/card_test.rb",
-                    files: { "app/card.rb" => { "sha" => "c1", "methods" => ["Card#b", "Card#a"], "blocks" => [12, 3] },
+                    files: { "app/card.rb" => { "sha" => "c1", "methods" => ["Card#b", "Card#a"], "blocks" => [12, 3], "lines" => [13, 4, 3] },
                              "const:Card Missing" => { "sha" => "absent" } },
                     constants: ["Card::LIMIT", "*::NAME"])
       model.add_run(test: %w[CardTest test_a], at: 1.0, sets: [env], files: {}, constants: [])
@@ -32,6 +32,16 @@ module Riptide
       assert_equal model.loads, decoded.loads
       assert_equal({ %w[CardTest test_a] => "test/card_test.rb" }, decoded.test_files)
       assert_equal model.encode, decoded.encode, "decoding and encoding again writes the same tree"
+    end
+
+    def test_the_lines_that_ran_are_posted_but_no_change_names_them
+      model = Model.new
+      run = model.add_run(test: %w[CardTest test_a], at: 1.0, sets: [], files: { "app/card.rb" => { "sha" => "c1", "methods" => ["Card#a"], "lines" => [3, 4] } }, constants: [])
+      index = Index.of(model.encode)
+      change = Change.new.tap { _1.methods << "Card#a" }
+
+      assert_equal [3, 4], index.model.set(run).files.dig("app/card.rb", "lines")
+      assert_equal [[:whole, nil, []], ["methods", "Card#a", [run]]], index.enum_for(:changed_holders, "app/card.rb", "c1", change).to_a
     end
 
     def test_a_runs_body_survives_a_round_trip_and_selection_never_needs_it

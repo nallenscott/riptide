@@ -31,8 +31,12 @@ module Riptide
   class Index
     # Goes up whenever what a run records changes meaning, like how a method
     # is named, so older runs read as none and their tests run once.
-    FORMAT = 6
+    FORMAT = 7
+    # The parts of a file a change can name, which selection matches on.
     FACETS = %w[methods blocks owners tables].freeze
+    # Plus the lines that ran, which say which way through a method a test
+    # went. Selection doesn't need them; the audit does.
+    POSTED = [*FACETS, "lines"].freeze
 
     Run = Struct.new(:id, :test, :at, keyword_init: true)
 
@@ -298,7 +302,7 @@ module Riptide
             posting = postings[[path, facets["sha"]]]
             (posting["all"] ||= []) << id
             (posting["whole"] ||= []) << id if facets["whole"]
-            FACETS.each { |facet| facets[facet]&.each { |name| ((posting[facet] ||= {})[name.to_s] ||= []) << id } }
+            POSTED.each { |facet| facets[facet]&.each { |name| ((posting[facet] ||= {})[name.to_s] ||= []) << id } }
           end
           holder.constants.each { |name| names[name] << id }
           holder.sets&.each { |set_id| members[set_id] << id }
@@ -396,9 +400,9 @@ module Riptide
         all = Index.ids(posting["all"])
         all.each { |id| holders[id].files[path] = { "sha" => version } }
         Index.ids(posting["whole"] || []).each { |id| holders[id].files[path]["whole"] = true }
-        FACETS.each do |facet|
+        POSTED.each do |facet|
           posting[facet]&.each do |name, ids|
-            value = facet == "blocks" ? Integer(name) : name
+            value = %w[blocks lines].include?(facet) ? Integer(name) : name
             Index.ids(ids).each { |id| (holders[id].files[path][facet] ||= []) << value }
           end
           all.each { |id| holders[id].files[path][facet]&.sort! }
