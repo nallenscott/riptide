@@ -523,7 +523,7 @@ module Riptide
       end
     end
 
-    def test_a_harvested_run_keeps_its_body_pointing_at_its_statements
+    def test_a_harvested_run_keeps_its_body_and_its_sets_scope
       with_remote do |_, clone|
         root = clone.("a")
         commit_file(root, "README", "x\n", push: true)
@@ -534,7 +534,9 @@ module Riptide
         files = { "app/widget.rb" => { "sha" => sha, "methods" => ["Widget#b"] } }
         statement = Store.set_id(files)
         feature.append_set(statement, files)
-        run = run_for(sha, sets: [statement])
+        setup = Store.set_id({ "app/widget.rb" => { "sha" => sha, "methods" => ["Widget#a"] } })
+        feature.append_set(setup, { "app/widget.rb" => { "sha" => sha, "methods" => ["Widget#a"] } }, scope: "class")
+        run = run_for(sha, sets: [statement, setup])
         run.body = [[3, statement, 5, [7], true, []]]
         run.ms = 9
         feature.append_run(run)
@@ -548,6 +550,8 @@ module Riptide
         assert_equal [[3, 5, [7], true]], run.body.map { |s| [s.line, s.ms, s.compared, s.wrote] }
         assert_equal ["Widget#b"], model.set(run.body.first.set).files.dig("app/widget.rb", "methods")
         assert_equal 9, run.ms
+        setup_set = (run.sets - run.body.map(&:set)).first
+        assert_equal "class", model.set(setup_set).scope, "a class setup's set still reaches its tests through the setup"
       end
     end
 

@@ -266,7 +266,7 @@ module Riptide
         hit = hits[runs_ref(key)]
         held = source.runs.values.flatten(1).reject { |id, _| read.include?(runs_ref(key)) && hit.include?(id) }
         held.sort_by { |_, run| run.at }.count do |_, run|
-          sets = run.sets.to_h { |id| [id, model.add_set(source.set(id).files, source.set(id).constants)] }
+          sets = run.sets.to_h { |id| [id, model.add_set(source.set(id).files, source.set(id).constants, scope: source.set(id).scope)] }
           body = run.body.map { |statement| statement.dup.tap { _1.set = sets[statement.set] } }
           model.add_run(test: run.test, at: run.at, sets: sets.values, files: run.files, constants: run.constants, file: source.test_files[run.test],
                         body: body, ms: run.ms, body_file: run.body_file)
