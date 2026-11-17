@@ -92,6 +92,34 @@ module Riptide
       refute run.inputs.key?(@concern), "what a class's loading ran lives in its shared set, not the run"
     end
 
+    FLOW = <<~RUBY
+      RecorderShop = Struct.new(:id) do
+        def self.table_name = "shops"
+      end
+
+      class RecorderFlowTest < Minitest::Test
+        def test_flow
+          Riptide::Collectors.creating { Riptide::Collectors.flowed(%(INSERT INTO "shops" ("name") VALUES ('a'))).then { Riptide::Collectors.made(RecorderShop.new(1)) } }
+          Riptide::Collectors.flowed(%(UPDATE "orders" SET "paid" = TRUE))
+          Riptide::Collectors.flowed(%(SELECT COUNT(*) FROM "orders"))
+          Riptide::Collectors.flowed(%(SELECT "shops".* FROM "shops" WHERE "id" = 1)).then { Riptide::Collectors.loaded(RecorderShop.new(1)) }
+          Riptide::Collectors.flowed(%(SELECT "shops".* FROM "shops" WHERE "id" = 9)).then { Riptide::Collectors.loaded(RecorderShop.new(9)) }
+        end
+      end
+    RUBY
+
+    def test_a_statement_reads_the_writes_of_the_ones_whose_records_or_tables_it_used
+      load_traced("recorder/flow_test.rb", FLOW) unless defined?(RecorderFlowTest)
+      test = RecorderFlowTest.new("test_flow")
+      @recorder.record(test) { test.run }
+
+      body = recorded(%w[RecorderFlowTest test_flow]).first.body
+      assert_equal [7, 8, 9, 10, 11], body.map(&:first)
+      assert_equal [true, true, false, false, false], body.map { _1[4] }
+      assert_equal [[], [], [1], [0], []], body.map(&:last),
+                   "a count reads the update before it, a load reads the record made before it, and a load of a record nobody made reads nothing"
+    end
+
     # A file that loaded mid-test and couldn't be traced leaves every run
     # after it missing what that file ran.
     def test_once_the_tracer_misses_code_only_outcomes_are_recorded

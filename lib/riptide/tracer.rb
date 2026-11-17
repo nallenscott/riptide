@@ -8,6 +8,9 @@ module Riptide
   module Tracer
     Trace = Struct.new(:lines, :receivers)
 
+    # What one statement of a test body ran, and how long it took.
+    Statement = Struct.new(:trace, :seconds)
+
     module CoverageWatch
       def setup(*modes, **options) = watched(modes, options) { super }
       def start(*modes, **options) = watched(modes, options) { super }
@@ -33,6 +36,7 @@ module Riptide
 
         root = File.expand_path(root)
         prefixes = [root, File.realpath(root)].uniq.map { |path| "#{path}/" }
+        @prefixes = prefixes
         _install
         # The VM only looks for hooks on single iseqs while a targeted
         # TracePoint is on, so one sits on a method nothing calls. Turning it
@@ -113,6 +117,25 @@ module Riptide
       def drain
         lines, receivers = _drain
         Trace.new(lines, receivers)
+      end
+
+      # Runs +body+, a test method, in a window per top-level statement, each
+      # starting at a line in +starts+, until close_body. The test's window
+      # keeps what runs around the body. A test file that compiled before the
+      # tracer was installed, like the first one a process loads, which
+      # requires the test helper itself, gets its body traced here.
+      def open_body(body, starts)
+        iseq = RubyVM::InstructionSequence.of(body)
+        path = iseq.absolute_path
+        prefix = path && @prefixes&.find { |candidate| path.start_with?(candidate) }
+        target(iseq, path.delete_prefix(prefix).freeze) if prefix
+        _open_body(iseq, starts.sort)
+      end
+
+      # { statement's first line => Statement } for the statements that ran
+      # since open_body, or nil when no body is open.
+      def close_body
+        _close_body&.transform_values { |lines, receivers, seconds| Statement.new(Trace.new(lines, receivers), seconds) }
       end
 
       # [mtime, size] of +path+ when it was first compiled, or nil.

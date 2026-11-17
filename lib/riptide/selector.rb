@@ -156,20 +156,16 @@ module Riptide
       return suite(Cause.new("#{path} changed top-level code", :boot)) if change.suite?
       return yield("#{path} changed as a whole", ruby?(path) ? :code : whole_kind(path), recorded.call) if change.whole?
 
-      yield("#{path} changed as a whole", whole_kind(path), index.reach(postings["whole"] || []))
-      Index::FACETS.each do |facet|
-        by_name = postings[facet] || {}
-        change.public_send(facet).each do |name|
-          ids = by_name[name.to_s]
-          yield("#{path} changed #{name}", facet_kind(facet, change, name), index.reach(ids)) if ids
+      runs = nil
+      index.changed_holders(path, version, change) do |part, name, ids|
+        case part
+        when :whole then yield("#{path} changed as a whole", whole_kind(path), index.reach(ids))
+        when :constant, :named_constant
+          runs ||= recorded.call
+          reason = part == :constant ? "#{path} changed #{name}" : "#{path} changed #{name}, which the test may have looked up by name"
+          yield(reason, :constant, index.reach(ids).slice(*runs.keys))
+        else yield("#{path} changed #{name}", facet_kind(part, change, name), index.reach(ids))
         end
-      end
-      return if change.constants.empty?
-
-      runs = recorded.call
-      change.constants.each do |name|
-        yield("#{path} changed #{name}", :constant, index.reach(index.readers(name)).slice(*runs.keys))
-        yield("#{path} changed #{name}, which the test may have looked up by name", :constant, index.reach(index.readers("*::#{name.split("::").last}")).slice(*runs.keys))
       end
     end
 

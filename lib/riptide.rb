@@ -18,6 +18,7 @@ require_relative "riptide/layout"
 require_relative "riptide/analyzer"
 require_relative "riptide/resolver"
 require_relative "riptide/collectors"
+require_relative "riptide/assertions"
 require_relative "riptide/inputs"
 require_relative "riptide/env"
 require_relative "riptide/git"
@@ -29,6 +30,7 @@ require_relative "riptide/runner"
 require_relative "riptide/scope"
 require_relative "riptide/recorder"
 require_relative "riptide/session"
+require_relative "riptide/audit"
 
 module Riptide
   class << self

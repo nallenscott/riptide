@@ -523,6 +523,34 @@ module Riptide
       end
     end
 
+    def test_a_harvested_run_keeps_its_body_pointing_at_its_statements
+      with_remote do |_, clone|
+        root = clone.("a")
+        commit_file(root, "README", "x\n", push: true)
+        branch(root, "feature")
+        sha = commit_file(root, "app/widget.rb", "x = 2\n", push: true)
+        fetch(root, pr)
+        feature = store_for(root)
+        files = { "app/widget.rb" => { "sha" => sha, "methods" => ["Widget#b"] } }
+        statement = Store.set_id(files)
+        feature.append_set(statement, files)
+        run = run_for(sha, sets: [statement])
+        run.body = [[3, statement, 5, [7], true, []]]
+        run.ms = 9
+        feature.append_run(run)
+        feature.publish(build: pr)
+        merge(root, "squash")
+        harvest_main(root)
+
+        fetch(root, MAIN)
+        model = store_for(root).indexes.find(&:ref).model
+        _, run = model.runs.fetch(TEST).first
+        assert_equal [[3, 5, [7], true]], run.body.map { |s| [s.line, s.ms, s.compared, s.wrote] }
+        assert_equal ["Widget#b"], model.set(run.body.first.set).files.dig("app/widget.rb", "methods")
+        assert_equal 9, run.ms
+      end
+    end
+
     # main never downloads an unmerged PR's runs or counts its failures.
     def test_main_doesn_t_read_a_pr_that_hasn_t_landed
       with_remote do |remote, clone|

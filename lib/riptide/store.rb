@@ -32,8 +32,10 @@ module Riptide
   class Store
     # A test process's outcome for a test. +sets+ and +inputs+ are nil when
     # riptide couldn't trace what the test ran. +file+ is where the test is
-    # defined.
-    Run = Struct.new(:test, :at, :passed, :sets, :inputs, :file, keyword_init: true)
+    # defined. +body+ is its statements, as [line, set id, ms, compared,
+    # wrote, reads] with the set's id in the log, +ms+ how long the test
+    # took, and +body_file+ where the body is defined when that isn't +file+.
+    Run = Struct.new(:test, :at, :passed, :sets, :inputs, :file, :body, :ms, :body_file, keyword_init: true)
 
     # Who a build is. +key+ names its unit, +upstream+ the branch whose unit
     # it also reads, and for a PR, the branch it merges into. A harvesting
@@ -264,8 +266,10 @@ module Riptide
         hit = hits[runs_ref(key)]
         held = source.runs.values.flatten(1).reject { |id, _| read.include?(runs_ref(key)) && hit.include?(id) }
         held.sort_by { |_, run| run.at }.count do |_, run|
-          sets = run.sets.map { |id| model.add_set(source.set(id).files, source.set(id).constants) }
-          model.add_run(test: run.test, at: run.at, sets: sets, files: run.files, constants: run.constants, file: source.test_files[run.test])
+          sets = run.sets.to_h { |id| [id, model.add_set(source.set(id).files, source.set(id).constants)] }
+          body = run.body.map { |statement| statement.dup.tap { _1.set = sets[statement.set] } }
+          model.add_run(test: run.test, at: run.at, sets: sets.values, files: run.files, constants: run.constants, file: source.test_files[run.test],
+                        body: body, ms: run.ms, body_file: run.body_file)
         end
       end
       [count, pins]
@@ -306,7 +310,11 @@ module Riptide
         next if set_ids.include?(nil)
 
         inputs, constants = Index::Model.split(record["inputs"])
-        added += 1 if model.add_run(test: test, at: record["at"], sets: set_ids, files: inputs, constants: constants, file: record["file"])
+        body = (record["body"] || []).map do |line, set, ms, compared, wrote, reads|
+          Index::Model::Statement.new(line: line, set: set && ids[set], ms: ms, compared: compared, wrote: wrote, reads: reads)
+        end
+        added += 1 if model.add_run(test: test, at: record["at"], sets: set_ids, files: inputs, constants: constants, file: record["file"],
+                                    body: body, ms: record["ms"], body_file: record["body_file"])
       end
       unfinished.each { |test, count| (marks[test] ||= Set.new) << SecureRandom.hex(16) if count.positive? }
       records.select { |record| record["type"] == "load" }.each { |record| model.merge_loads(record["sha"], record["lines"]) }

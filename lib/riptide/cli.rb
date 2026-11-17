@@ -13,12 +13,17 @@ module Riptide
   # PRs that landed in it, keeps the ones that held, and deletes their
   # units. A release branch also reads main's with --upstream main.
   #
+  # `riptide audit` reads the units fetch brought and prints the tests to
+  # remove and the ones worth taking apart, priced against the branch's
+  # history. It only reads.
+  #
   # Riptide never fails a build: anything that goes wrong is a warning, and
   # the command still exits 0. Only a malformed command line exits 1.
   class CLI
     USAGE = "usage: riptide fetch [identity] | riptide publish --suite NAME [identity] [--log-dir DIR] [--retained-runs N]\n" \
+            "       riptide audit --suite NAME [--branch NAME] [--since DATE]\n" \
             "identity: --pr NUMBER --target BRANCH, or --branch NAME [--upstream BRANCH] [--harvest]\n" \
-            "both take [--remote NAME] [--root DIR]"
+            "all take [--root DIR], fetch and publish [--remote NAME]"
 
     def initialize(argv, out: $stdout, err: $stderr)
       @argv = argv.dup
@@ -28,7 +33,7 @@ module Riptide
 
     def call
       command = @argv.shift
-      unless %w[fetch publish].include?(command)
+      unless %w[fetch publish audit].include?(command)
         @err.puts USAGE
         return 1
       end
@@ -48,6 +53,8 @@ module Riptide
     private
 
     def run(command, options)
+      return audit(options) if command == "audit"
+
       build = build_of(options)
       return Store.fetch(root: options[:root], build: build, remote: options[:remote]) if command == "fetch"
 
@@ -57,6 +64,17 @@ module Riptide
       published = store.publish(build: build)
       @out.puts "[riptide] published #{published.ref}: #{published.runs} new runs, #{published.harvested} harvested"
       published.deleted.each { |ref| @out.puts "[riptide] deleted #{ref}" }
+    end
+
+    # The branch's last six months by default, the way it merged.
+    def audit(options)
+      root = options[:root]
+      store = Store.new(root: root, suite: options[:suite], log_dir: File.expand_path(options[:log_dir] || "tmp/riptide/#{options[:suite]}", root))
+      layout = Layout.new(root: root)
+      git = Git.new(root)
+      analyzer = Analyzer.new(layout: layout, blobs: store.method(:read_blob), load_facts: store.method(:load_facts))
+      history = Audit::History.new(git: git, analyzer: analyzer, layout: layout, branch: options[:branch] || "HEAD", since: options[:since] || "6 months ago")
+      @out.puts Audit.new(indexes: store.indexes, git: git, root: root, history: history).run
     end
 
     def build_of(options)
@@ -82,9 +100,12 @@ module Riptide
 
           options[:retained_runs] = value
         end
+        parser.on("--since DATE") { |value| options[:since] = value }
         parser.on("--root DIR") { |value| options[:root] = File.expand_path(value) }
       end.parse!(@argv)
-      raise OptionParser::MissingArgument, "--suite" if command == "publish" && !options[:suite]
+      raise OptionParser::MissingArgument, "--suite" if %w[publish audit].include?(command) && !options[:suite]
+      return options if command == "audit"
+
       raise OptionParser::MissingArgument, "--pr or --branch" unless options[:pr] || options[:branch]
       raise OptionParser::InvalidOption, "--pr and --branch" if options[:pr] && options[:branch]
       raise OptionParser::MissingArgument, "--target" if options[:pr] && !options[:target]

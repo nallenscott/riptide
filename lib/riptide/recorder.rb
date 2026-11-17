@@ -5,9 +5,11 @@ require "set"
 module Riptide
   # Records one run per test. Wraps Minitest::Test#run, which every runner
   # ends up calling: Minitest 5, Minitest 6 and Rails' parallel workers, so
-  # the window covers setup, the test and teardown alike. Each test class
-  # gets a scope around how Minitest runs it, so what its own setup runs,
-  # like a before_all, counts for its tests.
+  # the window covers setup, the test and teardown alike. The test's body
+  # runs in a window per top-level statement, each recorded as a set of its
+  # own, so the run is what ran around the body plus its statements. Each
+  # test class gets a scope around how Minitest runs it, so what its own
+  # setup runs, like a before_all, counts for its tests.
   class Recorder
     class << self
       attr_reader :current
@@ -45,6 +47,12 @@ module Riptide
         recorder = Recorder.current
         recorder ? recorder.record(self) { super } : super
       end
+
+      # Teardown runs around the body, not in its last statement.
+      def before_teardown
+        Recorder.current&.end_body
+        super
+      end
     end
 
     # Minitest runs a whole test class with run_suite in Minitest 6, which
@@ -67,6 +75,7 @@ module Riptide
       @written_sets = Set.new
       @warned = Set.new
       @scopes = [Scope.new { |trace, window| [share(process.call(trace, window), scope: "process")] }]
+      @body = nil
       @open = Set.new.compare_by_identity
       @lock = Mutex.new
       @owner = nil
@@ -94,13 +103,18 @@ module Riptide
         end
         Tracer.open_window
         Collectors.open
+        open_body(test)
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         result = nil
         begin
           result = yield
         ensure
+          ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
+          end_body
+          body, @body = @body, nil
           traced = Tracer.close_window
           window = Collectors.close
-          Recorder.aside { persist(test, result, scopes, traced, window) }
+          Recorder.aside { persist(test, result, scopes, traced, window, body, ms) }
         end
         result
       ensure
@@ -144,6 +158,12 @@ module Riptide
       @scopes.first.sets
     end
 
+    # Ends the split of the running test's body, once, when its teardown
+    # starts or the test is over.
+    def end_body
+      @body = [Tracer.close_body || {}, Collectors.close_body || {}, @span] if @body == :open
+    end
+
     def absorb_load_facts
       facts = Tracer.drain_load_facts
       @inputs.absorb(facts)
@@ -156,21 +176,98 @@ module Riptide
 
     private
 
+    # Splits the test's body by its top-level statements, from the source of
+    # the file that defines it. A body riptide can't read, like one a library
+    # generates, isn't split.
+    def open_body(test)
+      body = test.method(test.name)
+      path, line = body.source_location
+      file = path && relative(path)
+      ranges = file && @inputs.source_for(file)&.statements_at(line)
+      return if ranges.nil? || ranges.empty?
+
+      Tracer.open_body(body, ranges.map(&:first))
+      Collectors.open_body
+      @body = :open
+      @span = [file, ranges.first.first..ranges.last.last]
+    rescue StandardError
+      Tracer.close_body
+      Collectors.close_body
+      @body = nil
+    end
+
     # Load facts come first: a class that loaded during this test feeds what
     # the test depends on. A skipped test closes its start with nothing. A
     # failure to trace still records the outcome, so a failure still counts.
-    def persist(test, result, scopes, traced, window)
+    def persist(test, result, scopes, traced, window, body, ms)
       return outcome(test, result) if untraced? || scopes.nil?
 
       absorb_load_facts
       return outcome(test, result) if result.nil? || result.skipped? || !result.passed?
 
-      inputs, owner_sets = @inputs.for_test(traced, window)
-      sets = scopes + owner_sets.values.map { |files| share(files) }
-      @store.append_run(Store::Run.new(test: key(test), at: Time.now.to_f, passed: true, sets: sets, inputs: inputs, file: file(test)))
+      traces, collected, span = body
+      traced = keep_own_lines(traced, traces, span) if body
+      inputs, owners = @inputs.reached(traced, window)
+      statements = body ? statements_of(traces, collected, owners) : []
+      sets = scopes + @inputs.owner_sets(owners).values.map { |files| share(files) } + statements.filter_map { |statement| statement[1] }
+      defined_in = file(test)
+      body_file = span&.first unless span&.first == defined_in || statements.empty?
+      @store.append_run(Store::Run.new(test: key(test), at: Time.now.to_f, passed: true, sets: sets, inputs: inputs, file: defined_in, body: statements,
+                                       ms: ms, body_file: body_file))
     rescue StandardError => e
       warn "[riptide] couldn't record #{test.class.name}##{test.name}: #{e.class}: #{e.message}" if @warned.add?(e.class)
       outcome(test, result)
+    end
+
+    # The body's own lines are the test's, not the statements': every test's
+    # are its own, so they'd keep identical statements in different tests
+    # from sharing a set. They move from +traces+ to the test's +traced+
+    # window, so what the run depends on stays the same.
+    def keep_own_lines(traced, traces, (file, range))
+      own = []
+      traces.transform_values! do |statement|
+        lines = statement.trace.lines
+        next statement unless lines.key?(file)
+
+        mine, rest = lines[file].partition { |line| range.cover?(line) }
+        own.concat(mine)
+        kept = rest.empty? ? lines.except(file) : lines.merge(file => rest)
+        Tracer::Statement.new(Tracer::Trace.new(kept, statement.trace.receivers), statement.seconds)
+      end
+      return traced if own.empty?
+
+      Tracer::Trace.new(traced.lines.merge(file => (traced.lines.fetch(file, []) | own).sort), traced.receivers)
+    end
+
+    # [line, set id, ms, compared, wrote, reads] per statement that ran, in
+    # order. Each statement's set is what it depended on, and the classes it
+    # used join +owners+, the run's. A statement reads an earlier one's
+    # writes when it loaded a record that one made, or counted or loaded from
+    # a table that one changed or made a record in.
+    def statements_of(traces, collected, owners)
+      starts = (traces.keys | collected.keys).sort
+      flows = starts.map { |start| (collected[start] || [nil, Collectors::Flow.blank]).last }
+      starts.each_with_index.map do |start, position|
+        statement = traces[start]
+        window = collected[start]&.first || Collectors::NOTHING
+        files, used = @inputs.reached(statement&.trace || Tracer::Trace.new({}, []), window)
+        owners.merge(used)
+        flow = flows[position]
+        seen = flow.counted | flow.loaded.map(&:first)
+        reads = (0...position).select do |earlier|
+          made = flows[earlier].made
+          made.intersect?(flow.loaded) || flows[earlier].changed.intersect?(seen) || made.map(&:first).to_set.intersect?(flow.counted)
+        end
+        [start, files.empty? ? nil : share(files), ((statement&.seconds || 0) * 1000).round, flow.compared.sort, flow.wrote.any?, reads]
+      end
+    end
+
+    def relative(path)
+      root = "#{File.realpath(@inputs.root)}/"
+      real = File.realpath(path)
+      real.delete_prefix(root) if real.start_with?(root)
+    rescue SystemCallError
+      nil
     end
 
     # Once the tracer misses code, like a file it couldn't trace, or what

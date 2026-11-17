@@ -57,12 +57,19 @@ module Riptide
       @lines = text.lines
       @references = Hash.new { |h, k| h[k] = [] }
       @significant = significant_lines(text, result)
+      @statements = {}
 
       walk_program(result.value)
+      collect_statements(result.value)
       collect_references(result.value, [])
       magic_comments(result)
       @lines = nil
     end
+
+    # The top-level statements of the body of a method or block that starts
+    # at +line+, as line ranges, or nil. A block's call counts too, since a
+    # test named across lines reports where its block starts.
+    def statements_at(line) = @statements[line]
 
     # nil for blank lines, comments and anything outside every unit.
     def unit_at(line)
@@ -191,6 +198,24 @@ module Riptide
           top(statement)
         end
       end
+    end
+
+    def collect_statements(node)
+      body = case node
+             when Prism::DefNode then node.body
+             when Prism::BlockNode then node.body
+             end
+      if body
+        body = body.statements if body.is_a?(Prism::BeginNode)
+        nodes = body.is_a?(Prism::StatementsNode) ? body.body : [body]
+        ranges = nodes.compact.map { |statement| (statement.location.start_line..last_line(statement)) }
+        @statements[node.location.start_line] ||= ranges unless ranges.empty?
+      end
+      if node.is_a?(Prism::CallNode) && node.block.is_a?(Prism::BlockNode)
+        collect_statements(node.block)
+        @statements[node.location.start_line] ||= @statements[node.block.location.start_line]
+      end
+      node.compact_child_nodes.each { |child| collect_statements(child) unless node.is_a?(Prism::CallNode) && child.equal?(node.block) }
     end
 
     def top(statement)

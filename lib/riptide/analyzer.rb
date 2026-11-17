@@ -25,6 +25,17 @@ module Riptide
       @changes[key] = old_text && analyze(path, old_sha, text(old_text), text(File.binread(File.join(@layout.root, path))))
     end
 
+    # The Change from +old_sha+ to +new_sha+, two versions of +path+ in this
+    # repository's history, or nil when either isn't available.
+    def between(path, old_sha, new_sha)
+      key = [path, old_sha, new_sha]
+      return @changes[key] if @changes.key?(key)
+
+      old_text = @blobs.call(old_sha)
+      new_text = @blobs.call(new_sha)
+      @changes[key] = old_text && new_text && analyze(path, old_sha, text(old_text), text(new_text))
+    end
+
     private
 
     # App source is UTF-8. Anything that isn't stays bytes, and only whole

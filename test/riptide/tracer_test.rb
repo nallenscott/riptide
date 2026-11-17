@@ -27,6 +27,122 @@ module Riptide
       assert_equal [2, 3, 4], lines.fetch(path), "the def line is the method being called"
     end
 
+    def test_each_statement_of_a_split_body_gets_what_it_ran
+      path = load_traced("body/helpers.rb", <<~RUBY)
+        module TracerBodyHelpers
+          def self.one = :one
+          def self.two = :two
+        end
+      RUBY
+      test = load_traced("body/test.rb", <<~RUBY)
+        class TracerBodyTest
+          def go
+            TracerBodyHelpers.one
+            [1].each do
+              TracerBodyHelpers.two
+            end
+            TracerBodyHelpers.one
+          end
+        end
+      RUBY
+
+      body = nil
+      lines = traced do
+        Tracer.open_body(TracerBodyTest.instance_method(:go), [3, 4, 7])
+        TracerBodyTest.new.go
+        body = Tracer.close_body
+      end
+
+      assert_equal [3, 4, 7], body.keys.sort
+      assert_equal [2], body.fetch(3).trace.lines.fetch(path)
+      assert_equal [3], body.fetch(4).trace.lines.fetch(path), "a block inside a statement is that statement's"
+      assert_includes body.fetch(4).trace.lines.fetch(test), 5
+      assert_equal [2], body.fetch(7).trace.lines.fetch(path), "a line that ran before comes back for a later statement"
+      assert(body.values.all? { |statement| statement.seconds >= 0 })
+      refute lines.key?(path), "the test's window keeps only what ran around the body"
+    end
+
+    def test_what_runs_around_a_split_body_stays_in_the_tests_window
+      path = load_traced("body/around.rb", <<~RUBY)
+        module TracerBodyAround
+          def self.setup = :setup
+          def self.check = :check
+          def self.teardown = :teardown
+        end
+      RUBY
+      load_traced("body/around_test.rb", <<~RUBY)
+        class TracerBodyAroundTest
+          def go = TracerBodyAround.check
+        end
+      RUBY
+
+      body = nil
+      lines = traced do
+        TracerBodyAround.setup
+        Tracer.open_body(TracerBodyAroundTest.instance_method(:go), [2])
+        TracerBodyAroundTest.new.go
+        body = Tracer.close_body
+        TracerBodyAround.teardown
+      end
+
+      assert_equal [3], body.fetch(2).trace.lines.fetch(path), "a one-line body has no line event, so its entry splits it"
+      assert_equal [2, 4], lines.fetch(path)
+      assert_nil Tracer.statement
+    end
+
+    def test_a_tests_window_closing_ends_a_body_still_open
+      load_traced("body/unclosed.rb", "module TracerBodyUnclosed\n  def self.go = :go\nend\n")
+      load_traced("body/unclosed_test.rb", "class TracerBodyUnclosedTest\n  def go = TracerBodyUnclosed.go\nend\n")
+
+      traced do
+        Tracer.open_body(TracerBodyUnclosedTest.instance_method(:go), [2])
+        TracerBodyUnclosedTest.new.go
+      end
+
+      assert_nil Tracer.statement
+      assert_nil Tracer.close_body
+    end
+
+    def test_the_statement_running_is_the_one_whose_lines_the_body_reached
+      load_traced("body/statement_test.rb", <<~RUBY)
+        class TracerBodyStatementTest
+          def go(seen)
+            seen << Riptide::Tracer.statement
+            seen << [
+              Riptide::Tracer.statement
+            ]
+          end
+        end
+      RUBY
+
+      seen = []
+      traced do
+        Tracer.open_body(TracerBodyStatementTest.instance_method(:go), [3, 4])
+        TracerBodyStatementTest.new.go(seen)
+        Tracer.close_body
+      end
+
+      assert_equal [3, [4]], seen, "a statement's later lines are still that statement"
+    end
+
+    def test_a_body_that_compiled_before_the_tracer_gets_traced_when_it_opens
+      file = File.join(TRACE_ROOT, "body/untraced_test.rb")
+      FileUtils.mkdir_p(File.dirname(file))
+      File.write(file, "class TracerBodyUntracedTest\n  def go\n    :went\n  end\nend\n")
+      RubyVM::InstructionSequence.compile_file(file).eval
+
+      before = traced { TracerBodyUntracedTest.new.go }
+      body = nil
+      traced do
+        Tracer.open_body(TracerBodyUntracedTest.instance_method(:go), [3])
+        TracerBodyUntracedTest.new.go
+        body = Tracer.close_body
+      end
+
+      refute before.key?("body/untraced_test.rb"), "compiled where the tracer couldn't see it"
+      assert_equal [3], body.fetch(3).trace.lines.fetch("body/untraced_test.rb")
+    end
+
     # Ruby has nothing to hook in a file with no code, like an initializer
     # that's all comments, and loading it must still work.
     def test_a_file_with_no_code_loads

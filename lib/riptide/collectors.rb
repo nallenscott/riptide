@@ -9,6 +9,10 @@ module Riptide
   # listings and tables, from the moment riptide starts, so boot counts too:
   # an initializer loading a YAML file, or `Dir["test/support/**/*.rb"].each
   # { require it }` picking up a new file.
+  #
+  # A test's body splits into a window per statement, the way the tracer's
+  # does, and each statement also keeps its data flow: what it wrote, what it
+  # read, and what its assertions compared.
   module Collectors
     IDENTIFIER = /(?:"?\w+"?\.)?"?(\w+)"?/
     TABLE = /\b(?:JOIN|UPDATE|INTO|TRUNCATE(?:\s+TABLE)?)\s+(?:ONLY\s+)?#{IDENTIFIER}/i
@@ -36,6 +40,21 @@ module Riptide
       end
     end
 
+    # A statement's data flow. +wrote+ are tables it inserted into, updated
+    # or deleted from. +changed+ are tables an update, a delete or an insert
+    # outside a record touched, any of which can change what a later query
+    # finds. +counted+ are tables it read without loading their rows, like a
+    # count, an exists? or a join. +made+ and +loaded+ are [table, id]
+    # records, and +compared+ a digest per assertion or mock expectation.
+    Flow = Struct.new(:wrote, :changed, :counted, :made, :loaded, :compared, keyword_init: true) do
+      def self.blank = new(wrote: Set.new, changed: Set.new, counted: Set.new, made: Set.new, loaded: Set.new, compared: [])
+    end
+
+    WRITE = /\A\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:ONLY\s+)?#{IDENTIFIER}/i
+    # A record load reads one table's own columns.
+    RECORDS = /\A\s*SELECT\s+(?:DISTINCT\s+)?#{IDENTIFIER}\.\*\s+FROM\s+(?:ONLY\s+)?#{IDENTIFIER}/i
+    TRANSACTION = /\A\s*(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b/i
+
     # What a drain gives back when nothing was gathered, which is most of
     # the time.
     NOTHING = Window.blank.tap { |window| GATHERED.each { |field| window[field].freeze } }.freeze
@@ -45,8 +64,35 @@ module Riptide
 
     class << self
       # The innermost window inside the process's, or nil, which it also is
-      # while riptide's own work runs.
-      def current = (@current unless @aside)
+      # while riptide's own work runs. Inside a split body, the running
+      # statement's.
+      def current
+        return if @aside
+        return @current unless @body && (start = Tracer.statement)
+
+        (@body[start] ||= [Window.blank, Flow.blank]).first
+      end
+
+      # The running statement's data flow, or nil.
+      def flow
+        return if @aside || !@body
+
+        start = Tracer.statement
+        start && (@body[start] ||= [Window.blank, Flow.blank]).last
+      end
+
+      # Splits the test's window by statement until close_body.
+      def open_body
+        @body = {}
+        @asserting = 0
+      end
+
+      # { statement's first line => [Window, Flow] } since open_body, or nil.
+      def close_body
+        body = @body
+        @body = nil
+        body
+      end
 
       # Riptide's own file reads, listings and lookups aren't the app's, so
       # nothing gathers them.
@@ -75,7 +121,11 @@ module Riptide
       def install_frameworks
         if defined?(::ActiveRecord::Base) && !(::ActiveRecord::Base < Instantiations)
           ::ActiveRecord::Base.prepend(Instantiations)
-          ::ActiveSupport::Notifications.subscribe("sql.active_record") { |*, payload| (current || process)&.tables&.merge(tables_in(payload[:sql])) }
+          ::ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+            tables = tables_in(payload[:sql])
+            (current || process)&.tables&.merge(tables)
+            flowed(payload[:sql], tables) if @body && payload[:name] != "SCHEMA"
+          end
         end
         ::I18n.singleton_class.prepend(Translations) if defined?(::I18n) && !(::I18n.singleton_class < Translations)
       end
@@ -114,6 +164,49 @@ module Riptide
           list.split(",").each { |item| tables << item.strip[/\A#{IDENTIFIER}/, 1] }
         end
         tables.compact.map(&:downcase).uniq
+      end
+
+      # Where +sql+, which names +tables+, took the running statement's data.
+      def flowed(sql, tables = tables_in(sql))
+        return if sql.match?(TRANSACTION) || !(at = flow)
+
+        if (write = sql.match(WRITE))
+          table = write[2].downcase
+          at.wrote << table
+          at.changed << table unless @creating && write[1].upcase.start_with?("INSERT")
+          tables -= [table]
+        elsif (own = sql.match(RECORDS)) && own[1].casecmp?(own[2])
+          tables -= [own[2].downcase]
+        end
+        at.counted.merge(tables)
+      end
+
+      # A record's own insert is a row the statement made, not a change to
+      # what other queries find.
+      def creating
+        was = @creating
+        @creating = true
+        yield
+      ensure
+        @creating = was
+      end
+
+      def made(record) = flow&.made&.<<([record.class.table_name, record.id])
+      def loaded(record) = flow&.loaded&.<<([record.class.table_name, record.id])
+
+      # Whether an assertion starting now counts for the running statement:
+      # one inside another doesn't count again.
+      def comparing? = !flow.nil? && @asserting.zero?
+
+      # Notes what an assertion was handed, as a digest, or nil when it
+      # doesn't count. What runs inside it, like assert_difference's block, is
+      # still the statement's.
+      def compared(digest)
+        flow.compared << digest if digest && comparing?
+        @asserting += 1 if @body
+        yield
+      ensure
+        @asserting -= 1 if @body
       end
 
       def read(path)
@@ -172,7 +265,11 @@ module Riptide
 
       def init_with_attributes(...)
         Collectors.current&.classes&.add(self.class)
-        super
+        super.tap { Collectors.loaded(self) }
+      end
+
+      def _create_record(...)
+        Collectors.creating { super.tap { Collectors.made(self) } }
       end
     end
 

@@ -22,6 +22,7 @@ module Riptide
       boot = [Tracer.drain, Collectors.drain]
       Recorder.aside do
         Collectors.install_frameworks
+        Assertions.install(Minitest::Runnable.runnables)
         git = Git.new(@root)
         layout = Layout.new(root: @root, schema_path: @config.schema_path, fixtures_path: @config.fixtures_path)
         store = Store.new(root: @root, suite: @config.suite, log_dir: @config.log_dir)

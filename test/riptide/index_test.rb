@@ -34,6 +34,52 @@ module Riptide
       assert_equal model.encode, decoded.encode, "decoding and encoding again writes the same tree"
     end
 
+    def test_a_runs_body_survives_a_round_trip_and_selection_never_needs_it
+      model = Model.new
+      first = model.add_set({ "app/card.rb" => { "sha" => "c1", "methods" => ["Card#a"] } }, [])
+      second = model.add_set({ "app/card.rb" => { "sha" => "c1", "methods" => ["Card#b"] } }, ["Card::LIMIT"])
+      body = [
+        Model::Statement.new(line: 12, set: first, ms: 4, compared: [], wrote: true, reads: []),
+        Model::Statement.new(line: 13, set: nil, ms: 0, compared: [7, 3], wrote: false, reads: []),
+        Model::Statement.new(line: 15, set: second, ms: 2, compared: [9], wrote: false, reads: [0])
+      ]
+      run = model.add_run(test: %w[CardTest test_a], at: 1.0, sets: [first, second], files: {}, constants: [], body: body, ms: 9)
+
+      content = model.encode
+      index = Index.of(content)
+      decoded = index.model
+
+      assert_equal [[12, 13, 15], [3, 7], [0]], [decoded.set(run).body.map(&:line), decoded.set(run).body[1].compared, decoded.set(run).body[2].reads]
+      assert_equal model.encode, decoded.encode
+      assert_equal [9, [[12, first, 4, [], 1, []], [1, nil, 0, [3, 7], 0, []], [2, second, 2, [9], 0, [2]]]], content.fetch("bodies/#{Index.id_shard(run)}").fetch(run.to_s),
+                   "lines go as gaps and reads as how far back"
+      assert_equal({ run => :test }, index.reach([second]), "a statement's set reaches its test like the test's own run")
+
+      shared = model.add_run(test: %w[CardTest test_b], at: 1.0, sets: [first], files: {}, constants: [], body: body.first(1), ms: 4, body_file: "test/shared_tests.rb")
+      assert_equal "test/shared_tests.rb", Index.of(model.encode).model.set(shared).body_file
+      assert_equal [run], index.readers("Card::LIMIT").flat_map { |id| index.runs_for([id]).to_a }
+    end
+
+    def test_a_run_with_no_body_writes_none
+      model = Model.new
+      model.add_run(test: %w[ATest test_a], at: 1.0, sets: [], files: { "a.rb" => { "sha" => "a1" } }, constants: [])
+
+      assert_empty model.encode.keys.grep(%r{\Abodies/})
+      assert_equal [], Index.of(model.encode).model.runs.fetch(%w[ATest test_a]).first.last.body
+    end
+
+    def test_retention_drops_the_bodies_of_runs_it_drops
+      model = Model.new
+      old = model.add_run(test: %w[ATest test_a], at: 1.0, sets: [], files: { "a.rb" => { "sha" => "a1" } }, constants: [],
+                          body: [Model::Statement.new(line: 3, set: nil, ms: 1, compared: [1], wrote: false, reads: [])])
+      model.add_run(test: %w[ATest test_a], at: 2.0, sets: [], files: { "a.rb" => { "sha" => "a2" } }, constants: [],
+                    body: [Model::Statement.new(line: 3, set: nil, ms: 1, compared: [2], wrote: false, reads: [])])
+      model.retain(1)
+
+      refute(model.encode.fetch("bodies/#{Index.id_shard(old)}", {}).key?(old.to_s), "the dropped run's body goes with it")
+      assert_equal [[2]], model.runs.fetch(%w[ATest test_a]).map { |_, holder| holder.body.first.compared }
+    end
+
     def test_every_directory_is_sharded
       model = Model.new
       model.add_run(test: %w[ATest test_a], at: 1.0, sets: [], files: { "a.rb" => { "sha" => "a1b2" } }, constants: ["A"])

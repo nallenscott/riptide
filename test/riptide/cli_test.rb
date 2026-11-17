@@ -88,6 +88,23 @@ module Riptide
       end
     end
 
+    def test_audit_reads_the_suite_s_runs_and_prints_what_to_remove
+      with_clones do |a, _, _|
+        out = StringIO.new
+
+        assert_equal 0, CLI.new(["audit", "--suite", "unit", "--root", a], out: out).call
+        assert_match(/\A0 tests read, priced against 0 changes/, out.string)
+        assert_match(/Removable \(0\)/, out.string)
+      end
+    end
+
+    def test_audit_needs_a_suite
+      err = StringIO.new
+
+      assert_equal 1, CLI.new(["audit"], err: err).call
+      assert_match(/--suite/, err.string)
+    end
+
     def test_a_missing_suite_is_an_error
       err = StringIO.new
 

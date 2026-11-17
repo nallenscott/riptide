@@ -52,6 +52,13 @@ module Riptide
     # [{ path => facets }, { class name => { path => facets } }] for one
     # test. +traced+ is a closed Tracer window, +window+ the collectors'.
     def for_test(traced, window)
+      inputs, owners = reached(traced, window)
+      [inputs, owner_sets(owners)]
+    end
+
+    # [{ path => facets }, Set of class names] for what +traced+ and
+    # +window+ reached, with the classes it used left as names.
+    def reached(traced, window)
       entries = Hash.new { |h, path| h[path] = {} }
       owners = Set.new
 
@@ -69,10 +76,6 @@ module Riptide
       window.reads.each { |path| entries[path]["whole"] = true if recordable?(path) }
       locales.each { |path| entries[path]["whole"] = true } if window.translated
 
-      sets = expand(owners).each_with_object({}) do |owner, result|
-        files = owner_set(owner)
-        result[owner] = files unless files.empty?
-      end
       inputs = finish(entries).merge(fixture_listings(window.tables))
       window.listings.each { |pattern| inputs["#{Env::GLOB}#{pattern}"] = { "sha" => listing(pattern) } }
       # A name that turned up by the end of the test, like one an autoloader
@@ -81,7 +84,16 @@ module Riptide
         key = "#{inherit ? Env::CONSTANT : Env::OWN_CONSTANT}#{scope} #{name}"
         inputs[key] = { "sha" => Env::ABSENT } if Env.presence(key) == Env::ABSENT
       end
-      [inputs, sets]
+      [inputs, owners]
+    end
+
+    # { class name => { path => facets } }, a shared set per class in
+    # +owners+ and their ancestors, for what their loading ran.
+    def owner_sets(owners)
+      expand(owners).each_with_object({}) do |owner, result|
+        files = owner_set(owner)
+        result[owner] = files unless files.empty?
+      end
     end
 
     # The files a glob matches now, as one value to compare. Files outside

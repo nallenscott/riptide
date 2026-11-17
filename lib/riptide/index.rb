@@ -20,6 +20,7 @@ module Riptide
   #   names/<ab>            per constant name, the runs and sets that read it
   #   manifest/<ab>         per path, its recorded versions
   #   loads/<ab>            per file version, which classes each line ran for
+  #   bodies/<ab>           per run, its test body's statements
   #   blobs/<ab>/<sha>      pins that keep recorded versions fetchable
   #
   # A posting list is sorted ids stored as gaps. Runs and sets share one
@@ -30,7 +31,7 @@ module Riptide
   class Index
     # Goes up whenever what a run records changes meaning, like how a method
     # is named, so older runs read as none and their tests run once.
-    FORMAT = 5
+    FORMAT = 6
     FACETS = %w[methods blocks owners tables].freeze
 
     Run = Struct.new(:id, :test, :at, keyword_init: true)
@@ -116,6 +117,30 @@ module Riptide
       end
     end
 
+    # Yields each part of +change+ to +path+, recorded here at +version+,
+    # with the runs and sets that recorded that part: [:whole, nil, ids] for
+    # the ones that depended on the whole file, [facet, name, ids] for a
+    # method, block, owner or table, and for a changed constant
+    # [:constant, name, ids] for its readers and [:named_constant, name,
+    # ids] for those that looked up its last segment by name. A constant can
+    # be read anywhere, so its readers can include ones that never recorded
+    # +path+.
+    def changed_holders(path, version, change)
+      postings = postings(path, version)
+      yield :whole, nil, postings["whole"] || []
+      FACETS.each do |facet|
+        by_name = postings[facet] || {}
+        change.public_send(facet).each do |name|
+          ids = by_name[name.to_s]
+          yield facet, name, ids if ids
+        end
+      end
+      change.constants.each do |name|
+        yield :constant, name, readers(name)
+        yield :named_constant, name, readers("*::#{name.split("::").last}")
+      end
+    end
+
     def members(set_id)
       @members[set_id] ||= Index.ids(blob("members/#{Index.id_shard(set_id)}")&.fetch(set_id.to_s, nil) || [])
     end
@@ -165,7 +190,19 @@ module Riptide
     # The forward form of an index, for publishing to change: runs and sets
     # by id, each with the files it recorded and the constants it read.
     class Model
-      Holder = Struct.new(:test, :at, :sets, :files, :constants, :scope, keyword_init: true) do
+      # One top-level statement of a run's test body, in the order they ran:
+      # where it starts, the set of what it depended on, how many
+      # milliseconds it took, a digest of what each of its assertions or mock
+      # expectations compared, whether it wrote data, and the earlier
+      # statements, by position, whose writes it read.
+      Statement = Struct.new(:line, :set, :ms, :compared, :wrote, :reads, keyword_init: true)
+
+      # A run's +body+ is its statements, or empty for a test whose body
+      # couldn't be split, +ms+ how long the whole test took, and
+      # +body_file+ where the body is defined when that isn't the file of the
+      # test's class, like a module of shared tests. Selection never reads
+      # them.
+      Holder = Struct.new(:test, :at, :sets, :files, :constants, :scope, :body, :ms, :body_file, keyword_init: true) do
         def run? = !test.nil?
 
         # What the run or set depended on directly, and where a set came
@@ -207,9 +244,10 @@ module Riptide
       # Adds a passing run unless the test's newest run has the same
       # dependencies, which selects nothing differently. +file+ is where the
       # test is defined. Returns the run's id, or nil when it was dropped.
-      def add_run(test:, at:, sets:, files:, constants:, file: nil)
+      def add_run(test:, at:, sets:, files:, constants:, file: nil, body: [], ms: nil, body_file: nil)
         @test_files[test] = file if file
-        holder = Holder.new(test: test, at: at, sets: sets.uniq.sort, files: canonical(files), constants: constants.to_set)
+        holder = Holder.new(test: test, at: at, sets: sets.uniq.sort, files: canonical(files), constants: constants.to_set, body: body, ms: ms,
+                            body_file: body_file)
         newest = @tests[test].map { |id| @holders[id] }.max_by(&:at)
         return nil if newest && same_dependencies?(newest, holder)
 
@@ -279,6 +317,11 @@ module Riptide
           (content["tests/#{Index.shard(Index.test_key(test))}"] ||= []) << [*test, @test_files[test], runs]
         end
         members.each { |id, runs| (content["members/#{Index.id_shard(id)}"] ||= {})[id.to_s] = Index.gaps(runs) }
+        @holders.each do |id, holder|
+          next unless holder.run? && holder.body&.any?
+
+          (content["bodies/#{Index.id_shard(id)}"] ||= {})[id.to_s] = [holder.ms, encode_body(holder.body), holder.body_file].compact
+        end
         scopes = @holders.filter_map { |id, holder| [id.to_s, holder.scope] if holder.scope }.sort.to_h
         content["scopes"] = scopes unless scopes.empty?
         names.each { |name, ids| (content["names/#{Index.shard(name)}"] ||= {})[name] = Index.gaps(ids) }
@@ -320,14 +363,33 @@ module Riptide
           by_path.each { |file, values| values.each { |value, posting| add_postings(holders, file, value, posting) } }
         end
         (index.blob("scopes") || {}).each { |id, scope| holders[id.to_i].scope = scope }
+        index.each_blob("bodies/") do |_, bodies|
+          bodies.each do |id, (ms, statements, body_file)|
+            holder = holders[id.to_i]
+            holder.ms = ms
+            holder.body = decode_body(statements)
+            holder.body_file = body_file
+          end
+        end
         loads = {}
         index.each_blob("loads/") { |_, by_sha| loads.merge!(by_sha) }
         holders.default_proc = nil
         holders.each_value do |holder|
+          holder.body ||= [] if holder.run?
           holder.sets&.sort!
           holder.files = holder.files.sort.to_h { |path, facets| [path, facets.sort.to_h] }
         end
         new(holders: holders, loads: loads, pins: index.pins, next_id: index.blob("meta")&.fetch("next") || 0, test_files: test_files)
+      end
+
+      # Lines and the statements a statement read from go as gaps, from the
+      # last line and back from the statement itself.
+      def self.decode_body(entries)
+        line = 0
+        entries.each_with_index.map do |(gap, set, ms, compared, wrote, reads), position|
+          line += gap
+          Statement.new(line: line, set: set, ms: ms, compared: compared, wrote: wrote == 1, reads: reads.map { |back| position - back })
+        end
       end
 
       def self.add_postings(holders, path, version, posting)
@@ -360,6 +422,15 @@ module Riptide
       def canonical(files)
         files.sort.to_h do |path, facets|
           [path, facets.except("constants").sort.to_h { |facet, value| [facet, value.is_a?(Array) ? value.uniq.sort : value] }]
+        end
+      end
+
+      def encode_body(body)
+        line = 0
+        body.each_with_index.map do |statement, position|
+          gap = statement.line - line
+          line = statement.line
+          [gap, statement.set, statement.ms, statement.compared.sort, statement.wrote ? 1 : 0, statement.reads.map { |earlier| position - earlier }.sort]
         end
       end
 

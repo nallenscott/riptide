@@ -12,6 +12,11 @@
 // test's, a test class's, or the process's, which is always open and is all
 // there is at boot.
 //
+// A test's body runs in windows of its own, one per top-level statement. The
+// hook switches them when the test method itself reaches a line in another
+// statement, and charges the time since the last switch to the one that was
+// running, so the test's window keeps only what ran around its body.
+//
 // Hooks this close to the VM need Ruby's internal headers, which the build
 // gets from Ruby's source. On a Ruby without them the tracer says so and
 // riptide records nothing.
@@ -24,6 +29,7 @@
 #include "iseq.h"
 #include "ractor_core.h"
 #include "ruby/debug.h"
+#include <time.h>
 
 // Words per instruction, by opcode.
 extern const uint8_t rb_vm_insn_len_info[];
@@ -41,6 +47,16 @@ static VALUE last_receiver = Qnil;
 static VALUE load_facts = Qnil;    // relative path => { line => Array of classes }
 static VALUE load_called = Qnil;   // relative path => { line => true } for called code
 static VALUE owner_files = Qnil;   // class => { relative path => true }
+
+static const rb_iseq_t *body_iseq; // the test method whose statements are split, or NULL
+static long body_depth;            // how many windows enclose the test's
+static long *body_starts;          // each statement's first line, ascending
+static long body_count;
+static VALUE body_windows = Qnil;  // statement's first line => [window, receivers]
+static VALUE body_times = Qnil;    // statement's first line => seconds
+static VALUE body_outer = Qnil;    // [window, receivers] of the test itself
+static VALUE statement = Qnil;     // the first line of the statement running now
+static double statement_since;
 
 static VALUE last_relative = Qnil;
 static VALUE last_map = Qnil;
@@ -285,6 +301,68 @@ find_probe(const probes_t *probes, unsigned int pc)
     return -1;
 }
 
+static void forget_last(void);
+
+static double
+seconds_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void
+charge_statement(void)
+{
+    double now = seconds_now();
+    if (!NIL_P(statement)) {
+        VALUE spent = rb_hash_lookup2(body_times, statement, DBL2NUM(0.0));
+        rb_hash_aset(body_times, statement, DBL2NUM(NUM2DBL(spent) + now - statement_since));
+    }
+    statement_since = now;
+}
+
+// The statement +line+ belongs to: the last one starting at or before it, or
+// nil ahead of the first, like the method's own def line.
+static VALUE
+statement_of(long line)
+{
+    long low = 0, high = body_count - 1, found = -1;
+    while (low <= high) {
+        long mid = (low + high) / 2;
+        if (body_starts[mid] <= line) {
+            found = mid;
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+    return found < 0 ? Qnil : LONG2FIX(body_starts[found]);
+}
+
+// Lines go to +start+'s window from here. Every line probe comes back, so
+// each statement sees all of what it runs.
+static void
+switch_statement(VALUE start)
+{
+    charge_statement();
+    VALUE entry;
+    if (NIL_P(start)) {
+        entry = body_outer;
+    } else {
+        entry = rb_hash_lookup2(body_windows, start, Qnil);
+        if (NIL_P(entry)) {
+            entry = rb_assoc_new(rb_hash_new(), identity_hash());
+            rb_hash_aset(body_windows, start, entry);
+        }
+    }
+    window = RARRAY_AREF(entry, 0);
+    receivers = RARRAY_AREF(entry, 1);
+    statement = start;
+    rearm();
+    forget_last();
+}
+
 static void hook(VALUE data, rb_trace_arg_t *arg);
 
 // Whether another hook on the iseq listens for +line+, like a debugger's
@@ -323,6 +401,12 @@ hook(VALUE data, rb_trace_arg_t *arg)
     // An entry is on the line it starts at, the def or the block's opening.
     int line = event & ENTRIES ? ISEQ_BODY(probes->iseq)->location.first_lineno : probes->line[i];
     VALUE lineno = INT2FIX(line);
+
+    // A one-line body has no line event, so its entry counts too.
+    if (probes->iseq == body_iseq && event & (RUBY_EVENT_LINE | RUBY_EVENT_CALL | RUBY_EVENT_B_CALL) && RARRAY_LEN(enclosing) == body_depth) {
+        VALUE start = statement_of(line);
+        if (start != statement) switch_statement(start);
+    }
 
     if (loading > 0) {
         VALUE stack = open_stack(arg);
@@ -600,6 +684,79 @@ collect_lines(VALUE relative, VALUE map, VALUE result)
     return ST_CONTINUE;
 }
 
+// Splits the innermost window, a test's, by the statements of +iseqw+, the
+// test method, which start at the lines in +starts+.
+static VALUE
+tracer_open_body(VALUE self, VALUE iseqw, VALUE starts)
+{
+    (void)self;
+    if (body_iseq) rb_raise(rb_eRuntimeError, "a Riptide::Tracer body is already open");
+
+    body_count = RARRAY_LEN(starts);
+    body_starts = ALLOC_N(long, body_count);
+    for (long i = 0; i < body_count; i++) body_starts[i] = NUM2LONG(RARRAY_AREF(starts, i));
+    body_iseq = rb_iseqw_to_iseq(iseqw);
+    body_depth = RARRAY_LEN(enclosing);
+    body_windows = rb_hash_new();
+    body_times = rb_hash_new();
+    body_outer = rb_assoc_new(window, receivers);
+    statement = Qnil;
+    statement_since = seconds_now();
+    return Qnil;
+}
+
+static int
+collect_statement(VALUE start, VALUE entry, VALUE result)
+{
+    VALUE lines = rb_hash_new();
+    rb_hash_foreach(RARRAY_AREF(entry, 0), collect_lines, lines);
+    VALUE seen = RARRAY_AREF(entry, 1);
+    rb_hash_aset(result, start, rb_ary_new_from_args(3, lines, rb_funcall(seen, rb_intern("keys"), 0),
+                                                     rb_hash_lookup2(body_times, start, DBL2NUM(0.0))));
+    return ST_CONTINUE;
+}
+
+// { statement's first line => [{ relative path => [line, ...] }, [receiver
+// class, ...], seconds] } since the body opened, or nil when none was. Lines
+// go to the test's window again.
+static VALUE
+close_body(void)
+{
+    if (!body_iseq) return Qnil;
+
+    charge_statement();
+    VALUE result = rb_hash_new();
+    rb_hash_foreach(body_windows, collect_statement, result);
+    window = RARRAY_AREF(body_outer, 0);
+    receivers = RARRAY_AREF(body_outer, 1);
+    ruby_xfree(body_starts);
+    body_starts = NULL;
+    body_count = 0;
+    body_iseq = NULL;
+    body_windows = Qnil;
+    body_times = Qnil;
+    body_outer = Qnil;
+    statement = Qnil;
+    rearm();
+    forget_last();
+    return result;
+}
+
+static VALUE
+tracer_close_body(VALUE self)
+{
+    (void)self;
+    return close_body();
+}
+
+// The first line of the statement running now, or nil outside a split body.
+static VALUE
+tracer_statement(VALUE self)
+{
+    (void)self;
+    return body_iseq ? statement : Qnil;
+}
+
 // [{ relative path => [line, ...] }, [receiver class, ...]] for the
 // innermost window.
 static VALUE
@@ -616,6 +773,8 @@ tracer_close_window(VALUE self)
     (void)self;
     if (RARRAY_LEN(enclosing) == 0) rb_raise(rb_eRuntimeError, "no Riptide::Tracer window is open");
 
+    // A body still split when its test's window closes ends with it.
+    if (body_iseq && RARRAY_LEN(enclosing) == body_depth) close_body();
     rearm();
     VALUE result = contents();
     VALUE around = rb_ary_pop(enclosing);
@@ -690,6 +849,10 @@ Init_riptide_native(void)
     rb_gc_register_address(&last_relative);
     rb_gc_register_address(&last_map);
     rb_gc_register_address(&last_pinned);
+    rb_gc_register_address(&body_windows);
+    rb_gc_register_address(&body_times);
+    rb_gc_register_address(&body_outer);
+    rb_gc_register_address(&statement);
 
     rb_define_const(mTracer, "SUPPORTED", Qtrue);
     rb_define_singleton_method(mTracer, "_install", tracer_install, 0);
@@ -701,6 +864,9 @@ Init_riptide_native(void)
     rb_define_singleton_method(mTracer, "_drain_load_called", tracer_drain_load_called, 0);
     rb_define_singleton_method(mTracer, "_drain", tracer_drain, 0);
     rb_define_singleton_method(mTracer, "_owner_files", tracer_owner_files, 0);
+    rb_define_singleton_method(mTracer, "_open_body", tracer_open_body, 2);
+    rb_define_singleton_method(mTracer, "_close_body", tracer_close_body, 0);
+    rb_define_singleton_method(mTracer, "statement", tracer_statement, 0);
 }
 
 #else
