@@ -32,24 +32,36 @@ def log(job)
     .lines.map { |line| line.chomp.sub(/\A\S+Z /, "").gsub(/\e\[[0-9;]*m/, "") }
 end
 
-# The first test error, or the lines before the step failed when no test
-# got to report one.
+# The first test error. When no test got to report one, why the tracer
+# stayed off, with the compiler's errors when it didn't build, or else the
+# lines before the step failed, up to rake giving up.
 def first_error(lines)
   start = lines.index { |line| line.match?(/\A\s+1\) (Error|Failure):/) }
   return lines[start, ERROR_LINES].take_while.with_index { |line, i| i.zero? || !line.match?(/\A\s+\d+\) (Error|Failure):/) } if start
 
-  stop = lines.index { |line| line.start_with?("##[error]") } || lines.size
+  stop = lines.index { |line| line.start_with?("rake aborted!", "##[error]") } || lines.size
+  off = lines[0...stop].index { |line| line.start_with?("riptide will stay off") }
+  compiled = off && lines[0...off].rindex { |line| line.start_with?("riptide's tracer didn't compile:") }
+  return lines[(compiled || off)..off] + [lines[stop - 1]] if off
+
   lines[[stop - ERROR_LINES, 0].max...stop]
 end
 
-def section(job)
+# What a job hit. Jobs failed the same way when they hit the same error,
+# whichever test hit it first, since tests run in a different order in each.
+def failure(job)
   lines = log(job)
-  ruby = lines.find { |line| line.match?(/\Aruby \d\S* .*\[/) }
-  summary = lines.reverse.find { |line| line.match?(/\A\d+ runs, \d+ assertions/) }
   step = job["steps"].find { |s| s["conclusion"] == "failure" }&.fetch("name")
-  failed = ["Failed at **#{step || "an unknown step"}**", (": `#{summary}`" if summary)].join
-  error = "```\n#{first_error(lines).map(&:rstrip).join("\n").strip}\n```"
-  ["### #{job["name"]}", ("`#{ruby}`" if ruby), failed, error].compact.join("\n\n")
+  summary = lines.reverse.find { |line| line.match?(/\A\d+ runs, \d+ assertions/) }
+  error = first_error(lines).map(&:rstrip).join("\n").strip
+  { ruby: lines.find { |line| line.match?(/\Aruby \d\S* .*\[/) }, step: step, summary: summary,
+    error: error, same: error.lines.reject { |line| line.match?(/\A\S+#test_|\A\s+\S+:\d+:in /) }.join }
+end
+
+def section(jobs, found)
+  failed = ["Failed at **#{found[:step] || "an unknown step"}**", (": `#{found[:summary]}`" if found[:summary])].join
+  also = "The same in:\n#{jobs.drop(1).map { |name| "- #{name}" }.join("\n")}" if jobs.size > 1
+  ["### #{jobs.first}", also, ("`#{found[:ruby]}`" if found[:ruby]), failed, "```\n#{found[:error]}\n```"].compact.join("\n\n")
 end
 
 repo = ENV.fetch("GH_REPO")
@@ -66,7 +78,10 @@ when "success"
 when "failure"
   jobs = gh("api", "--paginate", "repos/#{repo}/actions/runs/#{ENV.fetch("RUN_ID")}/jobs", "--jq", ".jobs[]")
          .lines.map { |line| JSON.parse(line) }.select { |job| job["conclusion"] == "failure" && job["name"].start_with?("Ruby") }
-  body = ["#{LEAD} These jobs failed.", *jobs.map { |job| section(job) }, "riptide `#{ENV.fetch("SHA")[0, 7]}` · #{run_url}"].join("\n\n")
+  failures = jobs.to_h { |job| [job["name"], failure(job)] }
+  sections = failures.group_by { |_, found| found.values_at(:ruby, :step, :summary, :same) }
+                     .map { |_, same| section(same.map(&:first), same.first.last) }
+  body = ["#{LEAD} These jobs failed.", *sections, "riptide `#{ENV.fetch("SHA")[0, 7]}` · #{run_url}"].join("\n\n")
   if issue
     post("issue", "comment", issue.to_s, "--body", body)
   else

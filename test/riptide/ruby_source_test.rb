@@ -145,7 +145,9 @@ module Riptide
       FileUtils.cp(File.expand_path("../../lib/riptide/version.rb", __dir__), File.join(dir, "lib/riptide"))
       yield File.join(ext, "riptide_native.c") if block_given?
       env = { "RIPTIDE_RUBY_SOURCE" => source, "RIPTIDE_TRACER" => "on" }
-      assert system(env, RbConfig.ruby, File.join(ext, "extconf.rb"), chdir: File.join(dir, "build"), out: File::NULL, err: File::NULL)
+      err = File.join(dir, "configure.err")
+      assert system(env, RbConfig.ruby, File.join(ext, "extconf.rb"), chdir: File.join(dir, "build"), out: File::NULL, err: err)
+      @configure_err = File.read(err)
       File.read(File.join(dir, "build/riptide_build.h"))[/RIPTIDE_UNSUPPORTED "(.*)"/, 1]
     end
 
@@ -162,6 +164,7 @@ module Riptide
         off = configure(dir, tree) { |c| File.write(c, File.read(c) + "void riptide_missing(void);\nvoid riptide_calls_it(void) { riptide_missing(); }\n") }
 
         assert_equal "the tracer doesn't build against Ruby #{RUBY_VERSION}", off
+        assert_match(/riptide's tracer didn't compile:\n.*riptide_missing/m, @configure_err, "the install says what failed")
       end
     end
   end

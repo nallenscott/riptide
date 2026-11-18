@@ -9,6 +9,17 @@ require_relative "../../lib/riptide/version"
 #
 # RIPTIDE_TRACER=on builds the tracer on a Ruby it isn't written for yet, to
 # see whether it works there, and RIPTIDE_TRACER=off builds without it.
+
+# The errors from mkmf's last check, which only its log keeps. The compiler's
+# output sits between the command and the program it checked, warnings and
+# all, so this keeps the lines that say what failed.
+def compiler_errors
+  lines = File.exist?("mkmf.log") ? File.readlines("mkmf.log") : []
+  checked = lines.rindex("checked program was:\n") or return []
+  command = lines[0...checked].rindex { |line| line.rstrip.end_with?('"') } || -1
+  lines[(command + 1)...checked].grep(/error|undefined|Undefined|referenced from|\A\s+"/).first(20)
+end
+
 off = nil
 begin
   raise "riptide only traces CRuby" unless RUBY_ENGINE == "ruby"
@@ -23,7 +34,11 @@ begin
   # export, turns riptide off, not the install. Only linking catches the
   # second, since the extension loads fine and dies when the tracer calls it.
   source = File.read(File.join(__dir__, "riptide_native.c")).sub(%(#include "riptide_build.h"\n), "")
-  raise "the tracer doesn't build against Ruby #{RUBY_VERSION}" unless try_link(source + MAIN_DOES_NOTHING)
+  unless try_link(source + MAIN_DOES_NOTHING)
+    errors = compiler_errors
+    warn "riptide's tracer didn't compile:\n#{errors.join}" if errors.any?
+    raise "the tracer doesn't build against Ruby #{RUBY_VERSION}"
+  end
 rescue StandardError => e
   off = e.message
   warn "riptide will stay off: #{off}"
