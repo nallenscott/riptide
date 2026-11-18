@@ -8,9 +8,7 @@ It understands Ruby methods, constants, class loading, ActiveRecord, database qu
 
 Test history lives in Git and can be reused across pull requests, main, and release branches, regardless of how changes were merged. No external services or changes to your tests required.
 
-<!-- TODO: Replace this placeholder with the approved Riptide demo GIF.
-     Suggested path: docs/assets/riptide-demo.gif
-     Demo: Change a Ruby method, run Riptide, see the selected tests. -->
+![A full run of 291 tests, then a one-line change to Order#total_cents that runs only the 20 tests that use it](docs/assets/riptide-demo.gif)
 
 ## Why Riptide?
 
