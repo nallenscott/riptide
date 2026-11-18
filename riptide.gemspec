@@ -21,7 +21,7 @@ Gem::Specification.new do |spec|
   # TRACED_RUBIES.
   spec.required_ruby_version = ">= 4.0"
 
-  spec.files = Dir["lib/**/*.rb", "ext/**/*.{rb,c,h}", "exe/*"] + ["riptide.gemspec"]
+  spec.files = Dir["lib/**/*.rb", "ext/**/*.{rb,c,h}", "exe/*"] + %w[riptide.gemspec README.md LICENSE.txt CHANGELOG.md]
   spec.bindir = "exe"
   spec.executables = ["riptide"]
   spec.require_paths = ["lib"]
