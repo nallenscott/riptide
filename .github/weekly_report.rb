@@ -13,6 +13,9 @@ LEAD = "The weekly run builds riptide's tracer on every maintained Ruby and on R
        "to catch a Ruby that breaks it before it ships."
 # Lines of the first error to show, test name and backtrace included.
 ERROR_LINES = 15
+# The compiler's lines the extension's build prints when the tracer doesn't
+# compile, the same ones it picks out of mkmf's log.
+COMPILER_ERROR = /error|undefined|Undefined|referenced from|\A\s+"/
 
 def gh(*args)
   out, err, status = Open3.capture3("gh", *args)
@@ -42,7 +45,8 @@ def first_error(lines)
   stop = lines.index { |line| line.start_with?("rake aborted!", "##[error]") } || lines.size
   off = lines[0...stop].index { |line| line.start_with?("riptide will stay off") }
   compiled = off && lines[0...off].rindex { |line| line.start_with?("riptide's tracer didn't compile:") }
-  return lines[(compiled || off)..off] + [lines[stop - 1]] if off
+  # The build's own output can land between the compiler's errors.
+  return lines[(compiled || off)..off].select { |line| line.match?(COMPILER_ERROR) || line.start_with?("riptide") } + [lines[stop - 1]] if off
 
   lines[[stop - ERROR_LINES, 0].max...stop]
 end
