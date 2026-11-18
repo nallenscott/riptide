@@ -1,48 +1,82 @@
 # frozen_string_literal: true
 
+require "digest"
+require "json"
 require "prism"
 require "set"
 
 module Riptide
-  # Finds the tests to remove and the tests worth taking apart, from the
-  # statements riptide records for every run's test body.
+  # Finds the tests to remove and the tests worth taking apart, from what
+  # riptide records for every run. It only reports what the runs prove.
   #
-  # A check is an assertion or mock expectation. It's the check as written,
-  # the earlier statements it depends on as written, the app code they
-  # reached and the values it compared. A test is removable when every check
-  # it makes is also made by a test that stays.
+  # Only a test's newest passing run of the file as it is now counts. One
+  # that's failing, or last passed on an older version of its file, isn't
+  # what's there anymore.
   #
-  # A megalith is a big test, and it's one of three shapes: independent
-  # scenarios that split apart, steps that build on each other, or one
-  # scenario, often with setup copied from its neighbors. Each is ranked by
-  # what it costs, how long it takes times how many changes in the branch's
-  # history would have picked it, and so is each part of a split.
+  # An inherited test runs again in every test class that subclasses the
+  # one it's from, which nesting a class to group tests does without saying
+  # so. One the class it's from never ran, like a base class's that only its
+  # subclasses run, is the subclass's own.
+  #
+  # A duplicate is the same program as a test in its class that stays: its
+  # method or block as written, everything it ran outside that, down to the
+  # lines, and the values each of its checks compared. Within one class,
+  # both share everything the class sets up, run or not. A test can't be
+  # compared that way when something it runs reads what isn't in the
+  # source: a local from around its body, like a test defined in a loop, or
+  # the test's own name. A test a subclass inherits is never the one to
+  # delete, since deleting it deletes theirs.
+  #
+  # A megalith is a big test, and it's one of two shapes: steps that build
+  # on each other, which split into a test per step, or one scenario, often
+  # with setup copied from its neighbors. Everything is priced by how long a
+  # test takes times how many changes in the branch's history would have
+  # picked it.
   class Audit
     CHECK = /\A(assert|refute|must_|wont_)/
-    # Tests this big count as megaliths whatever their shape.
+    # Tokens that don't change what a statement says.
+    SKIPPED = %i[COMMENT NEWLINE IGNORED_NEWLINE EMBDOC_BEGIN EMBDOC_LINE EMBDOC_END EOF __END__].freeze
+    # What a test calls to ask for its own name.
+    NAMES = %i[name method_name __method__].freeze
+    # Tests this big count as megaliths.
     BIG = 15
     # Setup lines a big test has to share with its neighbors to be worth a
     # helper.
     SHARED = 5
 
-    Statement = Struct.new(:line, :source, :shape, :check, :mock, :reads, :writes, :reached, :holder, :ms, :compared, :wrote, :data,
-                           keyword_init: true) do
+    # +check+ is a statement written as an assertion or one that ran one,
+    # like a helper's, and +mock+ one that set up a mock expectation.
+    Statement = Struct.new(:line, :source, :check, :mock, :compared, :holder, :ms, :wrote, keyword_init: true) do
       def checks? = check || mock
     end
 
-    Test = Struct.new(:name, :file, :ms, :statements, :around, :holders, keyword_init: true)
-    Check = Struct.new(:test, :line, :key, keyword_init: true)
-    Removal = Struct.new(:test, :twins, keyword_init: true)
+    # +statements+ are the ones that ran and +written+ the whole method or
+    # block. +run+ is the run's id, +around+ it plus its sets outside the
+    # body, +span+ the body's lines, and +unseen+ whether it reads something
+    # the source doesn't hold, like a local from around it or its own name.
+    Test = Struct.new(:name, :file, :ms, :statements, :written, :index, :run, :around, :span, :unseen, :inherited_from, keyword_init: true)
+
+    Copy = Struct.new(:test, :from, :ms, :picked, keyword_init: true)
+    # +of+ is the test that stays.
+    Duplicate = Struct.new(:test, :of, :ms, :picked, keyword_init: true)
     Part = Struct.new(:lines, :statements, :ms, :picked, keyword_init: true)
     Megalith = Struct.new(:test, :shape, :statements, :checks, :ms, :picked, :parts, :saved_ms, :shared_with, :shared_lines, keyword_init: true)
 
-    Report = Struct.new(:tests, :unread, :removals, :unchecked, :megaliths, :changes, keyword_init: true) do
+    # +outdated+ are the tests that are failing or last passed on an older
+    # version of their file.
+    Report = Struct.new(:tests, :unread, :outdated, :inherited, :duplicates, :unchecked, :megaliths, :changes, keyword_init: true) do
       def to_s(top: 25)
-        out = ["#{tests} tests read#{unread.empty? ? "" : ", #{unread.size} couldn't be"}, priced against #{changes} changes", ""]
-        out << "Removable (#{removals.size}): every check each makes, a test that stays makes too"
-        removals.each do |removal|
-          out << "  #{removal.test}"
-          removal.twins.each { |line, twin| out << "    line #{line} is also #{twin}" }
+        skipped = [(", #{unread.size} couldn't be" if unread.any?), (", #{outdated.size} failing or changed since they passed" if outdated.any?)].join
+        out = ["#{tests} tests read#{skipped}, priced against #{changes} changes", ""]
+        heading(out, "Inherited", "tests a class runs again because it subclasses the test class they're from", inherited)
+        inherited.group_by { |copy| [copy.test.split("#").first, copy.from] }.sort_by { |_, copies| -cost(copies) }.each do |(klass, from), copies|
+          out << format("  %s inherits %d from %s: %.1fs, %.1fs over the changes", klass, copies.size, from, copies.sum(&:ms) / 1000.0, cost(copies) / 1000.0)
+          copies.sort_by(&:test).each { |copy| out << "    #{copy.test.split("#", 2).last}" }
+        end
+        heading(out << "", "Duplicates", "the same body, run the same way, checking the same values, as a test in its class that stays", duplicates)
+        duplicates.each do |duplicate|
+          out << format("  %s: %.2fs, picked %d times", duplicate.test, duplicate.ms / 1000.0, duplicate.picked)
+          out << "    same as #{duplicate.of}"
         end
         out << "" << "Checks nothing (#{unchecked.size})"
         unchecked.each { |name| out << "  #{name}" }
@@ -50,11 +84,7 @@ module Riptide
         out << "" << "Megaliths (#{shown.size} of #{megaliths.size}, costliest first)"
         shown.each do |m|
           out << format("  %s: %d statements, %d checks, %.2fs, picked %d times", m.test, m.statements, m.checks, m.ms / 1000.0, m.picked)
-          case m.shape
-          when :scenarios
-            out << format("    %d independent scenarios; a split %s %.1fs", m.parts.size, m.saved_ms.positive? ? "saves" : "costs", m.saved_ms.abs / 1000.0)
-            m.parts.each { |part| out << format("      checks on %s: %d statements, %.2fs, picked %d", part.lines.join(","), part.statements, part.ms / 1000.0, part.picked) }
-          when :steps
+          if m.shape == :steps
             out << format("    %d steps that build on each other; a split costs %.1fs and names the failing step", m.parts.size, -m.saved_ms / 1000.0)
           else
             out << "    one scenario"
@@ -62,6 +92,14 @@ module Riptide
           out << "    shares setup lines #{m.shared_lines.join(",")} with #{m.shared_with.join(", ")}" if m.shared_with.any?
         end
         out.join("\n")
+      end
+
+      private
+
+      def cost(found) = found.sum { _1.ms * _1.picked }
+
+      def heading(out, title, rule, found)
+        out << format("%s (%d, %.1fs a build, %.1fs over the changes): %s", title, found.size, found.sum(&:ms) / 1000.0, cost(found) / 1000.0, rule)
       end
     end
 
@@ -71,23 +109,33 @@ module Riptide
       @git = git
       @root = root
       @history = history
+      @models = {}
+      @facts = {}
+      @current = {}
+      @named = {}
     end
 
     def run
-      tests, unread = read
-      checks = tests.to_h { |test| [test.name, checks_of(test)] }
-      Report.new(tests: tests.size, unread: unread, removals: removals(tests, checks),
-                 unchecked: tests.select { |test| checks[test.name].empty? }.map(&:name).sort,
+      tests, unread, outdated = read
+      by_name = tests.to_h { |test| [test.name, test] }
+      originals = tests.to_h { |test| [test, test.inherited_from && by_name["#{test.inherited_from}##{test.name.split("#", 2).last}"]] }
+      copies, own = tests.partition { |test| originals[test] }
+      Report.new(tests: tests.size, unread: unread, outdated: outdated, inherited: inherited(copies), duplicates: duplicates(own, originals.values.compact.to_set),
+                 unchecked: tests.reject { |test| test.statements.any?(&:checks?) }.map(&:name).sort,
                  megaliths: megaliths(tests), changes: @history&.size || 0)
     end
 
     private
 
-    # Each test's newest run, wherever it came from.
+    # Each test's newest run, wherever it came from, read a file version at
+    # a time, since a version's syntax tree is big and only its tests need
+    # it. A model decodes its whole index, so each is read once.
     def read
       newest = {}
+      failing = Set.new
       @indexes.each do |index|
-        model = index.model
+        model = @models[index] = index.model
+        failing.merge(index.marks.keys)
         model.runs.each do |test, runs|
           id, run = runs.max_by { |_, holder| holder.at }
           newest[test] = [index, model, id, run] if !newest[test] || newest[test].last.at < run.at
@@ -95,172 +143,217 @@ module Riptide
       end
       @test_files = newest.values.flat_map { |_, model, _, run| [model.test_files[run.test], run.body_file] }.compact.to_set
       unread = []
-      tests = newest.filter_map do |test, (index, model, id, run)|
-        found = run.body.any? && test_of(index, model, id, run)
-        unread << test.join("#") unless found
-        found || nil
+      outdated = []
+      versions = Hash.new { |h, k| h[k] = [] }
+      newest.each do |test, (index, model, id, run)|
+        file = run.body_file || model.test_files[run.test]
+        next unread << test.join("#") unless file && run.body_line && run.body.any?
+
+        sha = pinned(model, run, file)
+        next outdated << test.join("#") if failing.include?(test) || (sha && sha != current(file))
+
+        versions[[file, sha]] << [index, model, id, run]
       end
-      [tests, unread.sort]
+      tests = versions.flat_map do |(file, sha), runs|
+        text = text_of(file, sha)
+        program, tokens = text && parsed(text)
+        @named[[file, sha]] ||= program ? named(program) : Set.new
+        runs.filter_map do |index, model, id, run|
+          found = program && test_of(index, model, id, run, file, program, tokens)
+          unread << run.test.join("#") unless found
+          found || nil
+        end
+      end
+      [tests, unread.sort, outdated.sort]
     end
 
-    def test_of(index, model, id, run)
-      file = run.body_file || model.test_files[run.test]
-      nodes = file && body_nodes(file, version(model, run, file), run.body.map(&:line))
-      return unless nodes
+    def test_of(index, model, id, run, file, program, tokens)
+      node = body_at(program, run.body_line)
+      return unless node
 
+      nodes = body_statements(node).to_h { |statement| [statement.location.start_line, statement] }
       statements = run.body.map do |recorded|
-        node = nodes.fetch(recorded.line)
-        reads, writes, calls = names_in(node)
-        holder = recorded.set && model.set(recorded.set)
-        Statement.new(line: recorded.line, source: plain(node.slice), shape: shape(node), check: calls.any? { |name| name.match?(CHECK) },
-                      mock: calls.include?("expects"), reads: reads, writes: writes, reached: holder ? facts(holder.files) : Set.new,
-                      holder: recorded.set, ms: recorded.ms, compared: recorded.compared.sort, wrote: recorded.wrote, data: recorded.reads)
+        statement = nodes.fetch(recorded.line)
+        calls = calls_in(statement)
+        mock = calls.include?("expects")
+        Statement.new(line: recorded.line, source: written(statement, tokens), mock: mock,
+                      check: !mock && (calls.any? { |name| name.match?(CHECK) } || recorded.compared.any?),
+                      compared: recorded.compared, holder: recorded.set, ms: recorded.ms, wrote: recorded.wrote)
       end
       own = run.body.filter_map(&:set).to_set
-      around = run.sets.reject { |set| own.include?(set) }
-      Test.new(name: run.test.join("#"), file: file, ms: run.ms.to_i, statements: statements,
-               around: around.map { |set| facts(model.set(set).files) }.reduce(facts(run.files), :|), holders: [index, [id, *around]])
+      span = node.location.start_line..last_line(node)
+      Test.new(name: run.test.join("#"), file: file, ms: run.ms.to_i, statements: statements, written: written(node, tokens), index: index, run: id,
+               around: [id, *run.sets.reject { |set| own.include?(set) }], span: span,
+               unseen: captures?(node) || reads_name?(model, run, file, span), inherited_from: run.inherited_from)
     rescue KeyError
       nil
     end
 
-    # The version of +file+ the run recorded, which it pinned, or the one on
-    # disk when the file isn't one riptide records.
-    def version(model, run, file)
-      sha = ([run] + run.sets.map { |id| model.set(id) }).filter_map { |holder| holder.files.dig(file, "sha") }.first
-      (sha && @git.read(sha)) || File.read(File.join(@root, file))
-    rescue SystemCallError
+    # The version of +file+ the run recorded, or nil when the file isn't
+    # one riptide records.
+    def pinned(model, run, file)
+      ([run] + run.sets.map { |id| model.set(id) }).filter_map { |holder| holder.files.dig(file, "sha") }.first
+    end
+
+    # +file+ at +sha+, or as it is on disk, which is the same version when
+    # the run's is current.
+    def text_of(file, sha)
+      (sha && @git.read(sha)) || (File.read(File.join(@root, file)) if File.file?(File.join(@root, file)))
+    end
+
+    def current(file)
+      @current.fetch(file) { @current[file] = File.file?(full = File.join(@root, file)) ? Diff.blob_sha(full) : nil }
+    end
+
+    # The file's syntax tree, and its tokens in order without comments and
+    # line breaks, as [type, value, offset].
+    def parsed(text)
+      program, tokens = Prism.parse_lex(text).value
+      [program, tokens.filter_map { |token, _| [token.type, token.value, token.location.start_offset] unless SKIPPED.include?(token.type) }.sort_by(&:last)]
+    end
+
+    # The method or block whose body starts at +line+, the way the recorder
+    # found it: the outermost one starting there, or whose call does.
+    def body_at(node, line)
+      return node if (node.is_a?(Prism::DefNode) || node.is_a?(Prism::BlockNode)) && node.location.start_line == line
+      return node.block if node.is_a?(Prism::CallNode) && node.block.is_a?(Prism::BlockNode) && node.location.start_line == line
+
+      node.compact_child_nodes.each do |child|
+        found = body_at(child, line)
+        return found if found
+      end
       nil
     end
 
-    # { first line => statement node } for the method or block body whose
-    # statements start where the run's did.
-    def body_nodes(file, text, lines)
-      return unless text
-
-      found = nil
-      walk = lambda do |node|
-        return if found
-
-        body = node.body if node.is_a?(Prism::DefNode) || node.is_a?(Prism::BlockNode)
-        body = body.statements if body.is_a?(Prism::BeginNode)
-        statements = body.is_a?(Prism::StatementsNode) ? body.body : [body].compact
-        by_line = statements.to_h { |statement| [statement.location.start_line, statement] }
-        found = by_line if !statements.empty? && lines.all? { |line| by_line.key?(line) }
-        node.compact_child_nodes.each(&walk) unless found
-      end
-      walk.(Prism.parse(text).value)
-      found
+    def body_statements(node)
+      body = node.body
+      body = body.statements if body.is_a?(Prism::BeginNode)
+      body.is_a?(Prism::StatementsNode) ? body.body : [body].compact
     end
 
-    # Methods and blocks in the code under test. What a test's own code does
-    # is in its source, which a check matches on, and its own method would
-    # make every check unique.
-    def facts(files)
-      files.each_with_object(Set.new) do |(path, facets), all|
-        next if @test_files.include?(path)
-
-        Array(facets["methods"]).each { |method| all << method }
-        Array(facets["blocks"]).each { |line| all << "#{path}:#{line}" }
-      end
-    end
-
-    def names_in(node)
-      reads = Set.new
-      writes = Set.new
+    def calls_in(node)
       calls = Set.new
       walk = lambda do |inner|
-        case inner
-        when Prism::LocalVariableReadNode, Prism::InstanceVariableReadNode then reads << inner.name.to_s
-        when Prism::LocalVariableWriteNode, Prism::InstanceVariableWriteNode, Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode,
-             Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode, Prism::LocalVariableTargetNode, Prism::InstanceVariableTargetNode
-          writes << inner.name.to_s
-        when Prism::CallNode
-          calls << inner.name.to_s
-          reads << inner.name.to_s if inner.variable_call?
-        end
+        calls << inner.name.to_s if inner.is_a?(Prism::CallNode)
         inner.compact_child_nodes.each(&walk)
       end
       walk.(node)
-      [reads, writes, calls]
+      calls
     end
 
-    def plain(source) = source.gsub(/#.*$/, "").split.join(" ")
+    # Whether a block body reads or sets a local from around it. A local's
+    # depth counts the blocks out to where it lives, so one deeper than the
+    # blocks inside the body lives outside it. A method's body can't.
+    def captures?(node)
+      return false if node.is_a?(Prism::DefNode)
 
-    # A check as written, with variables and its failure message left out,
-    # so `refute @a.valid?` and `refute @b.valid?` are the same check of
-    # whatever their setup made.
-    def shape(node)
-      case node
-      when Prism::LocalVariableReadNode, Prism::InstanceVariableReadNode then "v"
-      when Prism::CallNode
-        args = node.arguments&.arguments || []
-        args = args[0...-1] if node.receiver.nil? && node.name.to_s.match?(CHECK) && args.size > 1 && message?(args.last)
-        "#{node.receiver && shape(node.receiver)}.#{node.name}(#{args.map { shape(_1) }.join(",")})#{node.block && "{#{shape(node.block)}}"}"
-      else
-        kids = node.compact_child_nodes
-        kids.empty? ? node.slice : "#{node.type}[#{kids.map { shape(_1) }.join(",")}]"
+      walk = lambda do |inner, depth|
+        return true if inner.class.name.start_with?("Prism::LocalVariable") && inner.respond_to?(:depth) && inner.depth > depth
+
+        inside = inner.is_a?(Prism::BlockNode) || inner.is_a?(Prism::LambdaNode) ? depth + 1 : depth
+        inner.compact_child_nodes.any? { |child| walk.(child, inside) }
+      end
+      node.compact_child_nodes.any? { |child| walk.(child, 0) }
+    end
+
+    # Whether the test's body, or test code it ran, asks for the test's
+    # name, which tells two tests apart without a line of difference. Code
+    # that ran outside every test, in a class's or the process's setup,
+    # had no test to ask about.
+    def reads_name?(model, run, file, span)
+      return true if @named.fetch([file, pinned(model, run, file)], Set.new).any? { |line| span.cover?(line) }
+
+      ([run] + run.sets.map { |id| model.set(id) }.reject(&:scope)).any? do |holder|
+        holder.files.any? do |path, facets|
+          @test_files.include?(path) && facets["lines"]&.any? { |line| named_at(path, facets["sha"]).include?(line) }
+        end
       end
     end
 
-    def message?(node) = node.is_a?(Prism::StringNode) || node.is_a?(Prism::InterpolatedStringNode)
-
-    # Removals
-
-    # A check depends on the earlier statements that write what it reads,
-    # call methods on it, or wrote data it read. A mock is checked by what
-    # runs after it.
-    def checks_of(test)
-      statements = test.statements
-      statements.each_index.select { |i| statements[i].checks? }.map do |i|
-        linked = linked(statements, i, objects: false)
-        linked |= ((i + 1)...statements.size).reject { |j| statements[j].checks? }.to_a if statements[i].mock
-        reached = linked.map { |j| statements[j].reached }.reduce(statements[i].reached, :|)
-        Check.new(test: test.name, line: statements[i].line,
-                  key: [statements[i].shape, linked.sort.map { |j| statements[j].source }, reached.to_a.sort, statements[i].compared])
+    def named_at(path, sha)
+      @named.fetch([path, sha]) do
+        text = text_of(path, sha)
+        @named[[path, sha]] = text ? named(Prism.parse(text).value) : Set.new
       end
     end
 
-    # What statement +i+ depends on, by its variables and the data it read.
-    # With +objects+, a statement that wrote data also counts for any object
-    # +i+ reads that existed before it, since writing can change it.
-    def linked(statements, i, objects:)
-      vars = statements[i].reads.dup
-      data = statements[i].data.to_set
-      got = []
-      (i - 1).downto(0) do |j|
-        s = statements[j]
-        next if !objects && s.checks?
-
-        hit = s.writes.intersect?(vars) || (s.reads.intersect?(vars) && s.writes.empty?) || data.include?(j) ||
-              (objects && s.wrote && vars.any? { |var| older?(statements, var, j) })
-        next unless hit
-
-        got << j
-        vars |= s.reads
-        data |= s.data
+    # The lines that ask for the running test's name.
+    def named(program)
+      lines = Set.new
+      walk = lambda do |node|
+        if node.is_a?(Prism::CallNode) && NAMES.include?(node.name) && (node.receiver.nil? || node.receiver.is_a?(Prism::SelfNode)) && node.arguments.nil?
+          lines << node.location.start_line
+        end
+        node.compact_child_nodes.each(&walk)
       end
-      got
+      walk.(program)
+      lines
     end
 
-    def older?(statements, var, j)
-      written = statements.each_index.select { |k| statements[k].writes.include?(var) }
-      written.empty? ? var.start_with?("@") : written.min < j
+    # A method or block as its tokens, from after a method's name, so
+    # spacing and comments don't count but what's inside a string does, a
+    # heredoc's body too.
+    def written(node, tokens)
+      from = node.is_a?(Prism::DefNode) ? node.name_loc.end_offset : node.location.start_offset
+      to = ends(node)
+      first = tokens.bsearch_index { |token| token.last >= from } || tokens.size
+      tokens[first..].take_while { |token| token.last < to }.map { |type, value, _| [type, value] }
     end
 
-    # Tests making the most checks stay, so the copy that goes is the one
-    # that adds least.
-    def removals(tests, checks)
-      makers = Hash.new { |h, key| h[key] = [] }
-      checks.each_value { |list| list.each { |check| makers[check.key] << check } }
-      removed = Set.new
-      tests.reject { |test| checks[test.name].empty? }.sort_by { |test| [checks[test.name].size, test.name] }.filter_map do |test|
-        twins = checks[test.name].map { |check| makers[check.key].find { |other| other.test != test.name && !removed.include?(other.test) } }
-        next unless twins.all?
+    # The last line of +node+, past any heredoc it opens.
+    def last_line(node)
+      own = node.respond_to?(:heredoc?) && node.heredoc? && node.closing_loc ? node.closing_loc.start_line : node.location.end_line
+      node.compact_child_nodes.map { |child| last_line(child) }.push(own).max
+    end
 
-        removed << test.name
-        Removal.new(test: test.name, twins: checks[test.name].zip(twins).map { |mine, twin| [mine.line, "#{twin.test}:#{twin.line}"] })
+    # Where +node+ ends, past any heredoc it opens.
+    def ends(node)
+      own = node.respond_to?(:heredoc?) && node.heredoc? && node.closing_loc ? node.closing_loc.end_offset : node.location.end_offset
+      node.compact_child_nodes.map { |child| ends(child) }.push(own).max
+    end
+
+    # Inherited and duplicate tests
+
+    def inherited(copies)
+      copies.map { |copy| Copy.new(test: copy.name, from: copy.inherited_from, ms: copy.ms, picked: picked(copy, copy.statements.each_index)) }
+    end
+
+    # Of each set of tests in a class that are the same program, the first
+    # by name stays. One that +lent+ to a subclass stays too, since deleting
+    # it deletes the subclass's, which runs another way.
+    def duplicates(tests, lent)
+      tests.reject(&:unseen).group_by { |test| [test.name.split("#").first, program(test)] }.values.select { |same| same.size > 1 }.flat_map do |same|
+        stays, *rest = same.sort_by(&:name)
+        rest.reject { |test| lent.include?(test) }.map do |test|
+          Duplicate.new(test: test.name, of: stays.name, ms: test.ms, picked: picked(test, test.statements.each_index))
+        end
+      end.sort_by { |duplicate| [-duplicate.ms * duplicate.picked, -duplicate.ms, duplicate.test] }
+    end
+
+    # The test as written, which of its statements ran and what their checks
+    # compared, and what it ran outside its own body. A test file's code
+    # counts by its lines alone, since the classes it names are the test's,
+    # which every copy names differently.
+    def program(test)
+      model = @models.fetch(test.index)
+      run = model.set(test.run)
+      ran = [facts(run, test.file, test.span)] + run.sets.map { |id| @facts[[test.index, id]] ||= facts(model.set(id), nil, nil) }
+      [test.written, test.statements.map { |statement| [statement.line - test.span.first, statement.compared] }, ran.compact.sort]
+    end
+
+    # A digest of what +holder+ ran, leaving out the lines in +span+ of
+    # +body_file+, or nil when that's nothing.
+    def facts(holder, body_file, span)
+      files = holder.files.filter_map do |path, facets|
+        next [path, facets] unless @test_files.include?(path)
+
+        lines = Array(facets["lines"])
+        lines = lines.reject { |line| span.cover?(line) } if path == body_file
+        [path, { "sha" => facets["sha"], "lines" => lines }] if lines.any?
       end
+      return if files.empty? && holder.constants.empty?
+
+      Digest::SHA1.hexdigest(JSON.generate([holder.scope, files, holder.constants.sort]))
     end
 
     # Megaliths
@@ -268,49 +361,18 @@ module Riptide
     def megaliths(tests)
       shared = shared_setup(tests)
       tests.filter_map do |test|
-        groups = scenarios(test)
-        next unless test.statements.size >= BIG || groups.size > 1
+        next if test.statements.size < BIG
 
         megalith = Megalith.new(test: test.name, statements: test.statements.size, checks: test.statements.count(&:checks?), ms: test.ms,
                                 picked: picked(test, test.statements.each_index), shared_with: shared.dig(test.name, :with) || [],
                                 shared_lines: shared.dig(test.name, :lines) || [])
-        if groups.size > 1
-          priced(megalith, :scenarios, test, groups)
-        elsif (stages = steps(test)).size > 1
-          priced(megalith, :steps, test, stages.each_index.map { |k| stages[0..k].flatten })
+        if (stages = steps(test)).size > 1
+          priced(megalith, test, stages.each_index.map { |k| stages[0..k].flatten })
         else
           megalith.shape = :scenario
         end
         megalith
       end.sort_by { |megalith| -megalith.ms * megalith.picked }
-    end
-
-    # Groups of checks that do something of their own. A statement every
-    # check needs is setup when it writes nothing, and the scenario itself
-    # when it writes, which keeps the checks together.
-    def scenarios(test)
-      statements = test.statements
-      checks = statements.each_index.select { |i| statements[i].checks? }
-      return [] if checks.size < 2
-
-      slices = checks.to_h do |i|
-        slice = [i] + linked(statements, i, objects: true)
-        ((i + 1)...statements.size).each { |j| slice |= [j] + linked(statements, j, objects: true) unless statements[j].checks? } if statements[i].mock
-        [i, slice]
-      end
-      used = slices.values.flatten.to_set
-      shared = slices.values.reduce(:&).reject { |j| statements[j].wrote } | statements.each_index.reject { |j| used.include?(j) }
-      groups = checks.map { |i| [i] }
-      while (pair = groups.combination(2).find { |a, b| (a.flat_map { slices[_1] } & b.flat_map { slices[_1] } - shared).any? })
-        groups.delete(pair[1])
-        pair[0].concat(pair[1])
-      end
-      own = ->(group) { (group.flat_map { slices[_1] } - shared).reject { |j| statements[j].checks? } }
-      scenarios, lookers = groups.partition { |group| own.(group).any? }
-      return [] if scenarios.size < 2
-
-      scenarios.first.concat(lookers.flatten)
-      scenarios.map { |group| (group.flat_map { slices[_1] } | shared).sort }
     end
 
     # Assertions that come after a write the later ones build on. A mock is
@@ -331,8 +393,8 @@ module Riptide
       stages.select { |stage| stage.any? { test.statements[_1].check } }
     end
 
-    def priced(megalith, shape, test, parts)
-      megalith.shape = shape
+    def priced(megalith, test, parts)
+      megalith.shape = :steps
       around = [test.ms - test.statements.sum(&:ms), 0].max
       megalith.parts = parts.map do |indexes|
         Part.new(lines: indexes.map { test.statements[_1] }.select(&:checks?).map(&:line), statements: indexes.size,
@@ -344,8 +406,7 @@ module Riptide
     def picked(test, indexes)
       return 0 unless @history
 
-      index, around = test.holders
-      @history.picks(index, around + indexes.filter_map { test.statements[_1].holder })
+      @history.picks(test.index, test.around + indexes.filter_map { test.statements[_1].holder })
     end
 
     # Setup lines a big test has word for word with others in its file.

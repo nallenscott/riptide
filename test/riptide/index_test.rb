@@ -67,7 +67,23 @@ module Riptide
 
       shared = model.add_run(test: %w[CardTest test_b], at: 1.0, sets: [first], files: {}, constants: [], body: body.first(1), ms: 4, body_file: "test/shared_tests.rb")
       assert_equal "test/shared_tests.rb", Index.of(model.encode).model.set(shared).body_file
+      copy = model.add_run(test: %w[CardTest::Grouped test_a], at: 1.0, sets: [first], files: {}, constants: [], body: body.first(1), ms: 4,
+                           body_line: 11, inherited_from: "CardTest")
+      decoded = Index.of(model.encode).model.set(copy)
+      assert_equal [11, nil, "CardTest"], [decoded.body_line, decoded.body_file, decoded.inherited_from]
       assert_equal [run], index.readers("Card::LIMIT").flat_map { |id| index.runs_for([id]).to_a }
+    end
+
+    def test_a_repeat_run_with_the_same_dependencies_keeps_the_faster_timings
+      model = Model.new
+      slow = [Model::Statement.new(line: 3, set: nil, ms: 900, compared: [1], wrote: false, reads: [])]
+      fast = [Model::Statement.new(line: 3, set: nil, ms: 4, compared: [1], wrote: false, reads: [])]
+      files = { "a.rb" => { "sha" => "a1" } }
+      run = model.add_run(test: %w[ATest test_a], at: 1.0, sets: [], files: files, constants: [], body: slow, ms: 950)
+
+      assert_nil model.add_run(test: %w[ATest test_a], at: 2.0, sets: [], files: files, constants: [], body: fast, ms: 5)
+      assert_nil model.add_run(test: %w[ATest test_a], at: 3.0, sets: [], files: files, constants: [], body: slow, ms: 950)
+      assert_equal [5, [4]], [model.set(run).ms, model.set(run).body.map(&:ms)], "a stall only ever adds time"
     end
 
     def test_a_run_with_no_body_writes_none

@@ -74,21 +74,34 @@ module Riptide
       class Odd
         def inspect = raise("can't describe me")
       end
+
+      module TaxChecks
+        def test_tax_checked = assert_equal(1, Shop.tax)
+      end
+      class TaxTest < Minitest::Test
+        include TaxChecks
+
+        def test_tax = assert_equal(1, Shop.tax)
+
+        class Grouped < TaxTest
+          def test_tax = assert_equal(1, Shop.tax)
+        end
+      end
     RUBY
 
     def test_each_statement_is_a_set_and_the_run_keeps_what_ran_around_the_body
       model = record_suite
       runs = model.runs.transform_values { |list| list.first.last }
 
-      assert_equal [%w[ShopTest test_odd], %w[ShopTest test_one_line], %w[ShopTest test_one_line_again], %w[ShopTest test_split]], runs.keys.sort,
-                   "a failing test records no run"
+      assert_equal [%w[ShopTest test_odd], %w[ShopTest test_one_line], %w[ShopTest test_one_line_again], %w[ShopTest test_split]],
+                   runs.keys.sort.select { _1.first == "ShopTest" }, "a failing test records no run"
       assert_equal [[0]], runs.fetch(%w[ShopTest test_odd]).body.map(&:compared), "a value riptide can't describe still passes, with a digest of 0"
       split = runs.fetch(%w[ShopTest test_split])
       assert_equal %w[Shop.close Shop.open], methods(split.files), "setup and teardown ran around the body"
       refute(split.body.any? { |statement| statement.set && model.set(statement.set).files.key?("test/suite_test.rb") && model.set(statement.set).files["test/suite_test.rb"]["methods"]&.include?("ShopTest#test_split") },
              "the body's own lines are the test's")
       body = split.body
-      assert_equal [12, 13, 14, 15], body.map(&:line)
+      assert_equal [11, [12, 13, 14, 15]], [split.body_line, body.map(&:line)], "the body starts on its def"
       assert_equal [["Shop.price"], [], ["Shop.price", "Shop.tax", "Shop.total"], []], body.map { |statement| statement.set ? methods(model.set(statement.set).files).sort : [] }
       assert_equal [[2], [], [2, 3, 7, 8], []], body.map { |statement| statement.set ? model.set(statement.set).files.fetch("app/shop.rb", {}).fetch("lines", []).sort : [] },
                    "each statement keeps the lines it ran"
@@ -100,6 +113,15 @@ module Riptide
       one = runs.fetch(%w[ShopTest test_one_line])
       assert_equal [[18, ["Shop.tax"]]], one.body.map { |statement| [statement.line, methods(model.set(statement.set).files)] }
       assert_equal one.body.first.set, runs.fetch(%w[ShopTest test_one_line_again]).body.first.set, "statements that reached the same code share a set"
+    end
+
+    def test_a_test_a_subclass_only_inherits_records_the_class_its_from
+      runs = record_suite.runs.transform_values { |list| list.first.last }
+
+      assert_equal({ %w[TaxTest test_tax] => nil, %w[TaxTest test_tax_checked] => nil, %w[TaxTest::Grouped test_tax] => nil,
+                     %w[TaxTest::Grouped test_tax_checked] => "TaxTest" },
+                   runs.select { |test, _| test.first.start_with?("TaxTest") }.transform_values(&:inherited_from),
+                   "one from a module counts once it's inherited, and one the subclass defines again is its own")
     end
 
     def test_a_test_files_own_lines_are_recorded_even_when_it_loads_first
@@ -123,7 +145,7 @@ module Riptide
         system("git", "-C", dir, "add", "-A", exception: true)
         system("git", "-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "start", exception: true)
         out, = Open3.capture2e("ruby", "-I", LIB, "test/suite_test.rb", chdir: dir)
-        assert_match(/5 runs, \d+ assertions, 1 failures, 0 errors/, out)
+        assert_match(/9 runs, \d+ assertions, 1 failures, 0 errors/, out)
         Store.new(root: dir, suite: "unit", log_dir: File.join(dir, "tmp/riptide/unit")).indexes.last.model
       end
     end

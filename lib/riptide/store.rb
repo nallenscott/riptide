@@ -34,8 +34,10 @@ module Riptide
     # riptide couldn't trace what the test ran. +file+ is where the test is
     # defined. +body+ is its statements, as [line, set id, ms, compared,
     # wrote, reads] with the set's id in the log, +ms+ how long the test
-    # took, and +body_file+ where the body is defined when that isn't +file+.
-    Run = Struct.new(:test, :at, :passed, :sets, :inputs, :file, :body, :ms, :body_file, keyword_init: true)
+    # took, +body_line+ the line its method or block starts on, +body_file+
+    # where the body is defined when that isn't +file+, and +inherited_from+
+    # the test class whose test it is when the test's class only inherits it.
+    Run = Struct.new(:test, :at, :passed, :sets, :inputs, :file, :body, :ms, :body_line, :body_file, :inherited_from, keyword_init: true)
 
     # Who a build is. +key+ names its unit, +upstream+ the branch whose unit
     # it also reads, and for a PR, the branch it merges into. A harvesting
@@ -269,7 +271,7 @@ module Riptide
           sets = run.sets.to_h { |id| [id, model.add_set(source.set(id).files, source.set(id).constants, scope: source.set(id).scope)] }
           body = run.body.map { |statement| statement.dup.tap { _1.set = sets[statement.set] } }
           model.add_run(test: run.test, at: run.at, sets: sets.values, files: run.files, constants: run.constants, file: source.test_files[run.test],
-                        body: body, ms: run.ms, body_file: run.body_file)
+                        body: body, ms: run.ms, body_line: run.body_line, body_file: run.body_file, inherited_from: run.inherited_from)
         end
       end
       [count, pins]
@@ -314,7 +316,8 @@ module Riptide
           Index::Model::Statement.new(line: line, set: set && ids[set], ms: ms, compared: compared, wrote: wrote, reads: reads)
         end
         added += 1 if model.add_run(test: test, at: record["at"], sets: set_ids, files: inputs, constants: constants, file: record["file"],
-                                    body: body, ms: record["ms"], body_file: record["body_file"])
+                                    body: body, ms: record["ms"], body_line: record["body_line"], body_file: record["body_file"],
+                                    inherited_from: record["inherited_from"])
       end
       unfinished.each { |test, count| (marks[test] ||= Set.new) << SecureRandom.hex(16) if count.positive? }
       records.select { |record| record["type"] == "load" }.each { |record| model.merge_loads(record["sha"], record["lines"]) }

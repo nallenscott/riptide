@@ -23,7 +23,7 @@ Every recorded run names the exact file versions it depended on, and riptide com
 - **The database:** the tables its SQL touched.
 - **Files:** the files it read, the directories it listed, the files it checked for, and the locale files if it translated anything.
 - **Names:** the classes it looked up by name, and the names it looked up that weren't there.
-- **Its body, statement by statement:** each top-level statement of the test's body is recorded as its own shared set, so identical statements across tests and runs are stored once. Its run keeps the statements in order, how long each took, what its assertions compared and which earlier statements' writes it read. Selection sees the same dependencies either way, and `riptide audit` reads the rest.
+- **Its body, statement by statement:** each top-level statement of the test's body is recorded as its own shared set, so identical statements across tests and runs are stored once. Its run keeps the statements in order, how long each took, what its assertions compared and which earlier statements' writes it read, plus the line its method or block starts on and the test class it's from when its class only inherits it. A later run with the same dependencies keeps whichever timings were faster, since a stall only ever adds time. Selection sees the same dependencies either way, and `riptide audit` reads the rest.
 - **Setup around it:** everything that ran before it outside any test, in its own test class or outside every class. That's the code that ran at boot, the files boot read, the files in any directory boot listed, like `Dir["test/support/**/*.rb"]`, a parallel worker's `parallelize_setup`, and its class's own setup, like a `before_all`. What a class runs after its last test, like an `after_all`, counts for no test.
 
 riptide only records files git tracks or would track, so an ignored file like a key never ends up in a recorded run.
@@ -149,23 +149,19 @@ Each runs ref holds an index from file versions to the runs that used each part 
 
 ## Auditing the suite
 
-`riptide audit` reads the runs `fetch` brought and finds tests to remove and tests worth taking apart. It only reads.
+`riptide audit` reads the runs `fetch` brought and finds tests to remove and tests worth taking apart. It only reads, and it only reports what the runs prove. A test counts by its newest passing run of its file as it is now, so one that's failing, or changed since it last passed, is left out.
 
 ```bash
 bundle exec riptide fetch --branch main
 bundle exec riptide audit --suite unit --branch origin/main --since "6 months ago"
 ```
 
-A check is an assertion or a mock expectation: the check as written, the earlier statements it depends on as written, the app code they reached, and the values it compared. A statement depends on the ones that set a local or ivar it reads, called a method on one, or wrote data it read, like a record it loaded or a table it counted. Test files' own code doesn't count toward what a check reached, since the source says what the test did.
-
-- **Removable:** every check a test makes, a test that stays makes too. The report names each check's twin.
+- **Inherited:** tests a class runs again because it subclasses the test class they're from, like a class nested inside another to group its tests. A base class's test that only its subclasses run is theirs.
+- **Duplicates:** the same program as a test in its class that stays. Its method or block is the same token for token, so spacing and comments don't count but parameters, strings, heredocs and rescues do. It ran the same lines everywhere outside its body, setup included, and its checks compared the same values. Tests in different classes never count, since a class's settings can change what the same body does without running a line. Neither does a test that reads something the source doesn't hold, like a local from around its body in a loop or its own name, or a test a subclass inherits, since deleting it deletes theirs.
 - **Checks nothing:** a test whose body ran no assertion or mock expectation.
-- **Megaliths:** tests of 15 statements or more, and any that split, costliest first. Cost is how long a test takes times how many of the branch's changes would have picked it, through the same matching selection uses. Each is one of three shapes:
-  - independent scenarios, with each part's checks and the time a split saves or costs
-  - steps that build on each other, where each part replays the steps before it
-  - one scenario, with the setup lines it shares word for word with other tests in its file
+- **Megaliths:** tests of 15 statements or more, costliest first. Each is either steps that build on each other, which split into a test per step, or one scenario, with the setup lines it shares word for word with other tests in its file.
 
-Past versions of a file have no load facts, and there's no app to ask whether a new method takes over a call, so pricing assumes it might.
+Everything is priced by how long a test takes times how many of the branch's changes would have picked it, through the same matching selection uses. Past versions of a file have no load facts, and there's no app to ask whether a new method takes over a call, so pricing assumes it might.
 
 ## Development
 

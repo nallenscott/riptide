@@ -189,7 +189,9 @@ module Riptide
       Tracer.open_body(body, ranges.map(&:first))
       Collectors.open_body
       @body = :open
-      @span = [file, ranges.first.first..ranges.last.last]
+      # Where the body's statements are, and the line its method or block
+      # starts on, which is how the audit finds it again.
+      @span = [file, ranges.first.first..ranges.last.last, line]
     rescue StandardError
       Tracer.close_body
       Collectors.close_body
@@ -213,7 +215,7 @@ module Riptide
       defined_in = file(test)
       body_file = span&.first unless span&.first == defined_in || statements.empty?
       @store.append_run(Store::Run.new(test: key(test), at: Time.now.to_f, passed: true, sets: sets, inputs: inputs, file: defined_in, body: statements,
-                                       ms: ms, body_file: body_file))
+                                       ms: ms, body_line: span&.last, body_file: body_file, inherited_from: inherited_from(test)))
     rescue StandardError => e
       warn "[riptide] couldn't record #{test.class.name}##{test.name}: #{e.class}: #{e.message}" if @warned.add?(e.class)
       outcome(test, result)
@@ -338,6 +340,17 @@ module Riptide
     end
 
     def key(test) = [test.class.name, test.name]
+
+    # The test class this one got the test from, when its superclass has
+    # the same method: one it defines, or includes from a module. A class
+    # that defines its own doesn't.
+    def inherited_from(test)
+      klass = test.class
+      parent = klass.superclass if klass.is_a?(Class)
+      return unless parent && parent < Minitest::Test && parent.public_method_defined?(test.name)
+
+      parent.name if parent.instance_method(test.name) == klass.instance_method(test.name)
+    end
 
     # The file that defines the test's class, relative to the root. A test
     # a library generates, like shoulda's `should`, lives in its class's

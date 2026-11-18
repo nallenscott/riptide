@@ -31,7 +31,7 @@ module Riptide
   class Index
     # Goes up whenever what a run records changes meaning, like how a method
     # is named, so older runs read as none and their tests run once.
-    FORMAT = 7
+    FORMAT = 8
     # The parts of a file a change can name, which selection matches on.
     FACETS = %w[methods blocks owners tables].freeze
     # Plus the lines that ran, which say which way through a method a test
@@ -202,11 +202,12 @@ module Riptide
       Statement = Struct.new(:line, :set, :ms, :compared, :wrote, :reads, keyword_init: true)
 
       # A run's +body+ is its statements, or empty for a test whose body
-      # couldn't be split, +ms+ how long the whole test took, and
-      # +body_file+ where the body is defined when that isn't the file of the
-      # test's class, like a module of shared tests. Selection never reads
-      # them.
-      Holder = Struct.new(:test, :at, :sets, :files, :constants, :scope, :body, :ms, :body_file, keyword_init: true) do
+      # couldn't be split, +ms+ how long the whole test took, +body_line+ the
+      # line its method or block starts on, +body_file+ where the body is
+      # defined when that isn't the file of the test's class, like a module
+      # of shared tests, and +inherited_from+ the test class whose test it is
+      # when the test's class only inherits it. Selection never reads them.
+      Holder = Struct.new(:test, :at, :sets, :files, :constants, :scope, :body, :ms, :body_line, :body_file, :inherited_from, keyword_init: true) do
         def run? = !test.nil?
 
         # What the run or set depended on directly, and where a set came
@@ -246,14 +247,19 @@ module Riptide
       end
 
       # Adds a passing run unless the test's newest run has the same
-      # dependencies, which selects nothing differently. +file+ is where the
+      # dependencies, which selects nothing differently. That one keeps the
+      # faster timings: a stalled database or a busy machine only ever adds
+      # time, so a test's fastest run is what it costs. +file+ is where the
       # test is defined. Returns the run's id, or nil when it was dropped.
-      def add_run(test:, at:, sets:, files:, constants:, file: nil, body: [], ms: nil, body_file: nil)
+      def add_run(test:, at:, sets:, files:, constants:, file: nil, body: [], ms: nil, body_line: nil, body_file: nil, inherited_from: nil)
         @test_files[test] = file if file
         holder = Holder.new(test: test, at: at, sets: sets.uniq.sort, files: canonical(files), constants: constants.to_set, body: body, ms: ms,
-                            body_file: body_file)
+                            body_line: body_line, body_file: body_file, inherited_from: inherited_from)
         newest = @tests[test].map { |id| @holders[id] }.max_by(&:at)
-        return nil if newest && same_dependencies?(newest, holder)
+        if newest && same_dependencies?(newest, holder)
+          newest.ms, newest.body = ms, body if ms && (newest.ms.nil? || ms < newest.ms)
+          return nil
+        end
 
         add(holder).tap { |id| @tests[test] << id }
       end
@@ -324,7 +330,9 @@ module Riptide
         @holders.each do |id, holder|
           next unless holder.run? && holder.body&.any?
 
-          (content["bodies/#{Index.id_shard(id)}"] ||= {})[id.to_s] = [holder.ms, encode_body(holder.body), holder.body_file].compact
+          body = [holder.ms, encode_body(holder.body), holder.body_line, holder.body_file, holder.inherited_from]
+          body.pop while body.last.nil?
+          (content["bodies/#{Index.id_shard(id)}"] ||= {})[id.to_s] = body
         end
         scopes = @holders.filter_map { |id, holder| [id.to_s, holder.scope] if holder.scope }.sort.to_h
         content["scopes"] = scopes unless scopes.empty?
@@ -368,11 +376,13 @@ module Riptide
         end
         (index.blob("scopes") || {}).each { |id, scope| holders[id.to_i].scope = scope }
         index.each_blob("bodies/") do |_, bodies|
-          bodies.each do |id, (ms, statements, body_file)|
+          bodies.each do |id, (ms, statements, body_line, body_file, inherited_from)|
             holder = holders[id.to_i]
             holder.ms = ms
             holder.body = decode_body(statements)
+            holder.body_line = body_line
             holder.body_file = body_file
+            holder.inherited_from = inherited_from
           end
         end
         loads = {}
