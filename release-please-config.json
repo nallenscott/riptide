@@ -4,6 +4,7 @@
   "packages": {
     ".": {
       "release-type": "ruby",
+      "initial-version": "0.1.0",
       "version-file": "lib/riptide/version.rb",
       "changelog-path": "CHANGELOG.md"
     }
