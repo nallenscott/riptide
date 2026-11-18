@@ -1,80 +1,62 @@
-# :ocean: riptide
+# riptide
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
+**Run the tests your changes can affect.**
 
-**Status: not production ready.** riptide is being validated against a large Rails app's CI. Treat any selection decision with suspicion until it's earned your trust.
+Riptide is a test impact analysis engine for Rails and Minitest. It records what each test depends on at runtime, then uses that history to determine which tests need to run when the code changes.
 
-Test impact analysis for Rails and Minitest. riptide records what each test depends on while it runs, then runs only the tests a change can affect, on pull requests, the main branch and release branches alike.
+It understands Ruby methods, constants, class loading, ActiveRecord, database queries, fixtures, and file access. It also tracks the code and files loaded during application and test setup.
+
+Test history lives in Git and can be reused across pull requests, main, and release branches, regardless of how changes were merged. No external services or changes to your tests required.
+
+<!-- TODO: Replace this placeholder with the approved Riptide demo GIF.
+     Suggested path: docs/assets/riptide-demo.gif
+     Demo: Change a Ruby method, run Riptide, see the selected tests. -->
+
+## Why Riptide?
+
+Large Rails applications can spend a lot of CI time running tests that have nothing to do with the changes being tested.
+
+Selecting tests by filename only gets you so far. Ruby's dynamic behavior makes it difficult to know what a test actually depends on without running it.
+
+Riptide records those dependencies as tests execute. When something changes, it compares the changed code with what each test previously used.
+
+The result is a smaller test run, with an explanation of why each test was selected.
 
 ## How it works
 
-riptide records what each test touches while it runs. When the code changes, it reruns only the tests whose recorded dependencies the change reaches.
+Riptide builds a dependency history from passing test runs. Each run records the exact versions of the files and code it used.
 
-Every recorded run names the exact file versions it depended on, and riptide compares them with the files on disk, never with a base commit. So a pull request, main and a release branch all work the same way, however a PR merged.
+When those files change, Riptide analyzes the differences and determines which recorded runs are still valid.
 
-### What a test depends on
+For example, consider three tests:
 
-- **Code it ran:** the methods and blocks it ran, during setup, the test itself and teardown.
-- **Constants:** the constants it read, and for a constant whose value ran code at load, that code too.
-- **Classes:**
-  - the ones it called methods on;
-  - ActiveRecord models it created or loaded without running a line of their file;
-  - the code that ran while those classes loaded, like a concern's `included` block, and the constants that code read.
-- **The database:** the tables its SQL touched.
-- **Files:** the files it read, the directories it listed, the files it checked for, and the locale files if it translated anything.
-- **Names:** the classes it looked up by name, and the names it looked up that weren't there.
-- **Its body, statement by statement:** each top-level statement of the test's body is recorded as its own shared set, so identical statements across tests and runs are stored once. Its run keeps the statements in order, how long each took, what its assertions compared and which earlier statements' writes it read, plus the line its method or block starts on and the test class it's from when its class only inherits it. A later run with the same dependencies keeps whichever timings were faster, since a stall only ever adds time. Selection sees the same dependencies either way, and `riptide audit` reads the rest.
-- **Setup around it:** everything that ran before it outside any test, in its own test class or outside every class. That's the code that ran at boot, the files boot read, the files in any directory boot listed, like `Dir["test/support/**/*.rb"]`, a parallel worker's `parallelize_setup`, and its class's own setup, like a `before_all`. What a class runs after its last test, like an `after_all`, counts for no test.
+- `test_widget` calls `Widget#size`.
+- `test_other` calls `Other#size`.
+- `test_both` calls both methods.
 
-riptide only records files git tracks or would track, so an ignored file like a key never ends up in a recorded run.
+Changing the implementation of `Widget#size` selects `test_widget` and `test_both`. The recorded run for `test_other` is still valid.
 
-### What a change selects
+This example comes from Riptide's own end-to-end tests, which also verify that passing runs can be reused after pull requests are merged, including squash merges.
 
-When a file differs from the version a test recorded, riptide works out what changed in it and selects the tests that used that part.
+### What Riptide tracks
 
-| Change | Tests it selects |
-|---|---|
-| Anything inside a method or block, including lines Ruby never reports running, like `else`, `rescue` or the second line of a call's arguments | The tests that ran it |
-| A constant's value | The tests that read it, including through `self.class::LIMIT` or `const_get(:LIMIT)` |
-| A declaration, like `belongs_to`, `validates` or `scope` | The tests that used the class |
-| A new method that could take over a call, from an ancestor, an attribute, `method_missing`, another file reopening the class, or a core class like `String` | The tests that used the class |
-| A table or its fixtures, in `db/structure.sql` or `db/schema.rb`, including a fixture file added, deleted or moved to another model | The tests that touched the table, plus for a foreign key the tests that touched the table it points at |
-| A file a test read, a directory it listed, or a name it found missing that now exists | The tests that did that |
-| A file in `fallback_patterns`, like `Gemfile.lock` or an initializer | Every test |
-| A file that loaded before riptide started, like the test helper | Every test |
-| Top-level code that runs at boot, or code a parallel worker runs before its tests | Every test after it |
-| Code a test class runs before its tests, like a `before_all` | That class's tests |
-| A deleted file, or a recorded version git no longer has | The tests that recorded it |
-| Comments, blank lines, and methods reordered without crossing a class-level line like `private` | Nothing |
+Riptide records dependencies on executed methods and blocks, constants, classes, database tables, fixtures, files, and directories. It also accounts for code executed during application boot, test setup, and class loading.
 
-Dry run and enforce print how many tests each row selected, then, for each way a change reached tests, through their own runs, their test class's setup or the process's setup, the reasons behind the most. `plan_path` gets the same per test.
+Source changes are analyzed with Prism. Changes to unrelated methods, comments, or whitespace don't automatically invalidate every test associated with a file.
 
-A test that failed keeps running until a later build passes it, so a failure riptide can't trace back to code, like a flaky test, still reruns. A test with no recorded run always runs, and so do tests that share a name, like specs with the same `describe` and `it` text, since their runs can't be told apart.
+### Test history across branches
 
-### How runs move between builds
+Each passing run records the versions of its dependencies. Riptide checks those versions against the current files, rather than calculating changes from a Git diff base.
 
-1. A pull request build reads its own runs and its target branch's, and saves its own.
-2. main and stable read the runs of the pull requests that landed in them, found with `git merge-tree`, and keep the ones that still hold. An unmerged pull request never reaches them.
-3. Once main has a pull request's runs, it deletes that pull request's record. Anything nobody wrote to for 30 days goes too.
+A run recorded on one branch can still be valid on another.
 
-### What it can't see
+Records are stored in Git refs under `refs/riptide/`. Builds fetch the history they need and publish new results when they finish.
 
-- Behavior that depends on the clock, the network, randomness or the environment.
-- Code run in a process a test spawns.
-- A new method a test only probed with `respond_to?` or `try`.
-- State a class body writes into another class, like registering itself with a registry, read through that other class.
-- State one test or test class leaves behind for a later one, like an `after_all` changing what the next class sees.
-- An app constant only gem code reads, like a gem calling `Card.limit` where `limit` is gem code too.
-- `defined?(Foo)` and failed lexical constant reads. Lookups through `const_get` and `const_defined?` are covered.
-- Assets a browser loads during a system test. List them in `fallback_patterns` for suites that drive a browser.
+## Getting started
 
-## Requirements
+Riptide currently supports Ruby 4.0, Minitest 5.26.1 or later (below 7), and Git 2.45 or later.
 
-- Ruby 4.0. riptide installs on later Rubies but stays off until its tracer is written for their VM. The tracer builds against Ruby's internal headers, which installing riptide fetches with git from Ruby's repository on GitHub, at the running Ruby's exact commit. Set `RIPTIDE_RUBY_SOURCE` to a Ruby source tree, built or not, to skip the fetch. riptide only reads it. `RIPTIDE_TRACER=on` builds the tracer on a Ruby it isn't written for yet, to try it there, and `RIPTIDE_TRACER=off` builds without it.
-- Minitest 5.26.1 or later, below 7
-- git 2.45 or later, to install and to run
-
-## Setup
+Add it to your Gemfile:
 
 ```ruby
 group :test do
@@ -82,7 +64,7 @@ group :test do
 end
 ```
 
-Configure riptide at the very top of `test_helper.rb`, before the app loads. It has to see class bodies run.
+Configure Riptide at the beginning of `test_helper.rb`, before Rails loads:
 
 ```ruby
 require "riptide"
@@ -97,29 +79,27 @@ require "rails/test_help"
 require "minitest/riptide_plugin"
 ```
 
-Minitest 5 loads every installed plugin file by itself, so riptide does nothing until `Riptide.configure` is called.
+Run your tests normally:
 
-## Configuration
+```bash
+bundle exec rails test
+```
 
-| Option | Default | Meaning |
-|---|---|---|
-| `suite` | `"default"` | Names the refs runs are kept under, `refs/riptide/runs/<suite>/...`. A CI stage that runs a different slice of the tests is its own suite. |
-| `mode` | `:record` | `:record` records only. `:dry_run` also prints what it would run. `:enforce` runs only the selected tests. |
-| `fallback_patterns` | Gemfile, Gemfile.lock, config/application.rb, config/environment.rb, config/environments/test.rb, config/initializers/** | Files every test depends on as a whole. |
-| `source_patterns` | every file git knows about | Globs of the files dependencies are recorded on. The schema and fixtures always count. |
-| `locale_patterns` | `config/locales/**/*` | Locale files a test that translated anything depends on. |
-| `schema_path` | `db/structure.sql` or `db/schema.rb` | The schema file, analyzed per table. |
-| `fixtures_path` | `test/fixtures` | Fixture files, analyzed per table. |
-| `log_dir` | `tmp/riptide/<suite>` | Where test processes write runs until they're published. `publish` runs outside the tests, so pass it the same directory with `--log-dir`. |
-| `plan_path` | none | Also writes the selection as JSON. |
+Riptide supports three modes:
 
-## Sharing runs
+| Mode | Behavior |
+|---|---|
+| `:record` | Runs the full suite and records dependencies. |
+| `:dry_run` | Runs the full suite and reports which tests would have been selected. |
+| `:enforce` | Runs only the selected tests. |
 
-Runs live in git in the app's repository, under `refs/riptide/`. They never touch a branch, and a plain clone doesn't fetch them. The app can sit in a subdirectory of the repository, with the CLI run from there or given it as `--root`.
+Start with `:dry_run` to check selection decisions against your existing suite.
 
-Each suite keeps a unit per build: `branches/<branch>` for a branch and `prs/<number>` for a pull request. A unit is two refs, written and deleted together. `refs/riptide/runs/<suite>/<key>` holds the passing runs as an index. `refs/riptide/stamps/<suite>/<key>` holds the open failures and, for a pull request, its landing record: the branch it merges into and the files it changed. Both point at tags wrapping trees, so a publish uploads only what changed.
+## CI integration
 
-A pull request build reads its own unit and its target's, and writes its own:
+Riptide shares test history between CI builds using Git refs.
+
+For a pull request:
 
 ```bash
 bundle exec riptide fetch --pr 42 --target main
@@ -127,7 +107,7 @@ bundle exec rails test
 bundle exec riptide publish --suite unit --pr 42 --target main
 ```
 
-A build of a long-lived branch like main harvests:
+On main:
 
 ```bash
 bundle exec riptide fetch --branch main --harvest
@@ -135,33 +115,40 @@ bundle exec rails test
 bundle exec riptide publish --suite unit --branch main --harvest
 ```
 
-A release branch cut from main also reads main's unit, with `--branch stable --harvest --upstream main`.
+Riptide can identify which pull requests have landed, reuse their passing runs, and remove records that are no longer needed.
 
-`fetch` runs once before the tests and brings in every suite's units for the build, and nothing else: test processes read every unit riptide has locally. They only read refs and append to their own log, so a read-only `.git` is enough while tests run.
+See the [CI guide](docs/ci.md) for release branches, parallel test processes, and configuration options.
 
-A harvesting fetch also brings every pull request's stamp, a few KB each, and checks which landed. It replays each one's changed files onto the commit it's testing with `git merge-tree`. When that's clean and changes nothing, the pull request's changes are already there, however it merged, and only then does the build fetch its runs. A pull request that hasn't landed never reaches main's selection.
+## Auditing your test suite
 
-`publish` folds the logs into the build's unit. Passes of the tests selection picked become runs, and a test selection skipped already had one that holds. Failures, and tests that started and never finished, open failures. It keeps each test's newest 4 runs, or as many as `--retained-runs` says. Any of them can make a test skippable, so moving between branches reuses earlier runs. A publish that fails leaves the logs for the next one, so those failures aren't lost. A pass closes the open failures the build saw when it fetched, never one another build opened meanwhile. With `--harvest`, it first copies the passing runs and open failures of the pull requests that landed, then deletes their units. It also deletes any unit nobody wrote for 30 days, like one for a pull request closed without merging. Deleting a unit never skips a test, it only means a test gets run again.
-
-riptide never fails a build. A problem in `fetch` or `publish` prints a warning and exits 0, and means reading or saving less, so more tests run. Every git call has a deadline.
-
-Each runs ref holds an index from file versions to the runs that used each part of them, split into 256 shards so a publish rewrites only the shards that changed. Ids stay put between publishes. The ref only pins file versions from the commit the build checked out, so nothing staged, stashed or uncommitted gets pushed. Two builds publishing the same unit at once push with a lease, and the one that lost the race folds its logs in again and retries.
-
-## Auditing the suite
-
-`riptide audit` reads the runs `fetch` brought and finds tests to remove and tests worth taking apart. It only reads, and it only reports what the runs prove. A test counts by its newest passing run of its file as it is now, so one that's failing, or changed since it last passed, is left out.
+Riptide also uses recorded test execution to find tests that may be worth removing or restructuring.
 
 ```bash
 bundle exec riptide fetch --branch main
 bundle exec riptide audit --suite unit
 ```
 
-- **Inherited:** tests a class runs again because it subclasses the test class they're from, like a class nested inside another to group its tests. A base class's test that only its subclasses run is theirs.
-- **Duplicates:** the same program as a test in its class that stays. Its method or block is the same token for token, so spacing and comments don't count but parameters, strings, heredocs and rescues do. It ran the same lines everywhere outside its body, setup included, and its checks compared the same values. Tests in different classes never count, since a class's settings can change what the same body does without running a line. Neither does a test that reads something the source doesn't hold, like a local from around its body in a loop or its own name, or a test a subclass inherits, since deleting it deletes theirs.
-- **Checks nothing:** a test whose body ran no assertion or mock expectation.
-- **Megaliths:** tests of 15 statements or more, slowest first. Each is either steps that build on each other, which split into a test per step, or one scenario, with the setup lines it shares word for word with other tests in its file. A split makes the build slower, since each step's test runs the setup and the steps before it again, but a failure names the step that broke.
+The audit reports inherited tests, potential duplicates, tests that perform no assertions or mock expectations, and large tests that may benefit from being split up.
 
-Each test is listed with the file and line it starts on, and each section adds up what its tests take a build.
+It uses recorded execution, assertions, and statement-level dependencies to support its findings. The command is read-only and doesn't modify your tests.
+
+## Status and limitations
+
+Riptide is under active development and is being validated against a large Rails application's CI.
+
+Test selection is conservative when there's insufficient history or a previous test failure. Tests with no recorded run are executed, and failures continue running until a later build passes them.
+
+Some dependencies cannot be observed reliably, including external services, time-dependent behavior, and code executed in child processes. These may require additional fallback configuration.
+
+Review the [limitations](docs/limitations.md) before enabling `:enforce` in CI.
+
+## Documentation
+
+- [Architecture and dependency tracking](docs/architecture.md)
+- [CI integration and Git storage](docs/ci.md)
+- [Configuration reference](docs/configuration.md)
+- [Test auditing](docs/auditing.md)
+- [Limitations and fallback behavior](docs/limitations.md)
 
 ## Development
 
