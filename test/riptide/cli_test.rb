@@ -93,7 +93,7 @@ module Riptide
         out = StringIO.new
 
         assert_equal 0, CLI.new(["audit", "--suite", "unit", "--root", a], out: out).call
-        assert_match(/\A0 tests read, priced against 0 changes/, out.string)
+        assert_match(/\A0 tests read$/, out.string)
         assert_match(/^Inherited \(0, /, out.string)
         assert_match(/^Duplicates \(0, /, out.string)
       end

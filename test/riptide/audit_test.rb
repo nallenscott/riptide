@@ -313,31 +313,37 @@ module Riptide
       assert_equal ["ShopTest#test_missing"], report.unread
     end
 
-    def test_a_megalith_is_priced_by_the_changes_that_would_have_picked_it
-      in_repo do |root|
-        write_and_commit(root, "app/shop.rb", "class Shop\n  def self.price = 1\n  def self.tax = 1\nend\n", message: "start")
-        write_and_commit(root, "app/shop.rb", "class Shop\n  def self.price = 2\n  def self.tax = 1\nend\n", message: "price")
-        write_and_commit(root, "app/shop.rb", "class Shop\n  def self.price = 3\n  def self.tax = 1\nend\n", message: "price again")
-        write_and_commit(root, "app/shop.rb", "class Shop\n  def self.price = 3\n  def self.tax = 2\nend\n", message: "tax")
-        write_and_commit(root, "app/other.rb", "class Other\nend\n", message: "a file nothing recorded")
-        git = Git.new(root)
-        layout = Layout.new(root: root)
-        history = Audit::History.new(git: git, analyzer: Analyzer.new(layout: layout, blobs: git.method(:read), load_facts: ->(_) {}),
-                                     layout: layout, branch: "HEAD", since: "1 year ago")
-        source = +"class ShopTest < Minitest::Test\n  def test_flow\n"
-        statements = (3..18).map do |line|
-          source << (line.even? ? "    assert Shop.price\n" : "    Shop.tax\n")
-          line.even? ? [line, [], [1], { methods: ["Shop.price"] }] : [line, [], [], { wrote: true, methods: ["Shop.tax"], ms: 100 }]
-        end
-        source << "  end\nend\n"
-
-        report = audit(source, { "test_flow" => statements }, root: root, history: history, ms: 2000)
-
-        assert_equal 4, history.size
-        megalith = report.megaliths.first
-        assert_equal 3, megalith.picked, "the price changed twice and the tax once"
-        assert_equal [3] * 8, megalith.parts.map(&:picked), "every step runs both"
+    def test_a_split_adds_the_setup_and_earlier_steps_each_step_runs_again
+      source = +"class ShopTest < Minitest::Test\n  def test_flow\n"
+      statements = (3..18).map do |line|
+        source << (line.even? ? "    assert Shop.open?\n" : "    Shop.log\n")
+        line.even? ? [line, [7], [1], { ms: 10 }] : [line, [12], [], { wrote: true, ms: 100 }]
       end
+      source << "  end\nend\n"
+
+      megalith = audit(source, { "test_flow" => statements }, ms: 2000).megaliths.first
+
+      assert_equal (1..8).map { |k| 1120 + (110 * k) }, megalith.parts.map(&:ms), "each step runs the setup and every step before it"
+      assert_equal 10_920, megalith.split_ms, "every step but the last is a test the build didn't run before"
+    end
+
+    def test_the_report_says_where_each_test_is_and_names_a_few_neighbors
+      setup = (1..5).map { |n| "    Shop.log(#{n})\n" }.join
+      source = +"class ShopTest < Minitest::Test\n  def test_flow\n#{setup}"
+      source << (8..17).map { |line| line.even? ? "    assert Shop.open?\n" : "    Shop.log(#{line})\n" }.join << "  end\n"
+      neighbors = %w[a b c d].to_h do |name|
+        first = source.lines.size + 3
+        source << "\n  def test_#{name}\n#{setup}    assert Shop.open?\n  end\n"
+        ["test_#{name}", (first..first + 4).map { [_1, [12]] } << [first + 5, [7], [1]]]
+      end
+      source << "end\n"
+      flow = (3..17).map { |line| line.even? && line > 7 ? [line, [7], [1]] : [line, [12]] }
+
+      text = audit(source, { "test_flow" => flow, **neighbors }).to_s
+
+      assert_includes text, "  test/shop_test.rb:2  ShopTest#test_flow: 15 statements"
+      assert_includes text, "    shares setup lines 3-7 with test_a, test_b, test_c and 1 more"
+      assert_includes text, "    same as test/shop_test.rb:20  ShopTest#test_a"
     end
 
     private
@@ -349,9 +355,9 @@ module Riptide
     # of SHOP. A body runs from the line before its first statement to the
     # one after its last, or is the one line in +lines+. A run in +shas+
     # recorded that version of the test file, and +marks+ are open failures.
-    def audit(source, bodies, root: nil, history: nil, ms: 1000, classes: { "ShopTest" => {} }, setups: {}, lines: {}, shas: {}, marks: {})
-      run = lambda do |dir|
-        write_and_commit(dir, "app/shop.rb", SHOP, message: "shop") unless File.exist?(File.join(dir, "app/shop.rb"))
+    def audit(source, bodies, ms: 1000, classes: { "ShopTest" => {} }, setups: {}, lines: {}, shas: {}, marks: {})
+      in_repo do |dir|
+        write_and_commit(dir, "app/shop.rb", SHOP, message: "shop")
         sha = Diff.blob_sha(File.join(dir, "app/shop.rb"))
         FileUtils.mkdir_p(File.join(dir, "test"))
         File.write(File.join(dir, "test/shop_test.rb"), source)
@@ -362,7 +368,6 @@ module Riptide
             body = statements.map do |line, lines, compared = [], extra = {}|
               facets = { "sha" => sha }
               facets["lines"] = lines if lines.any?
-              facets["methods"] = extra[:methods] if extra[:methods]
               set = facets.size > 1 ? model.add_set({ "app/shop.rb" => facets }, []) : nil
               Statement.new(line: line, set: set, ms: extra.fetch(:ms, 0), compared: compared, wrote: extra.fetch(:wrote, false), reads: [])
             end
@@ -373,9 +378,8 @@ module Riptide
                           body: body, ms: ms, body_line: lines.fetch(name, statements.first.first - 1), inherited_from: options[:inherited_from])
           end
         end
-        Audit.new(indexes: [Index.of(model.encode, marks: marks)], git: Git.new(dir), root: dir, history: history).run
+        Audit.new(indexes: [Index.of(model.encode, marks: marks)], git: Git.new(dir), root: dir).run
       end
-      root ? run.(root) : in_repo { |dir| run.(dir) }
     end
   end
 end

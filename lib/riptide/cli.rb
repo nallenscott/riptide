@@ -14,14 +14,13 @@ module Riptide
   # units. A release branch also reads main's with --upstream main.
   #
   # `riptide audit` reads the units fetch brought and prints the tests to
-  # remove and the ones worth taking apart, priced against the branch's
-  # history. It only reads.
+  # remove and the ones worth taking apart. It only reads.
   #
   # Riptide never fails a build: anything that goes wrong is a warning, and
   # the command still exits 0. Only a malformed command line exits 1.
   class CLI
     USAGE = "usage: riptide fetch [identity] | riptide publish --suite NAME [identity] [--log-dir DIR] [--retained-runs N]\n" \
-            "       riptide audit --suite NAME [--branch NAME] [--since DATE]\n" \
+            "       riptide audit --suite NAME\n" \
             "identity: --pr NUMBER --target BRANCH, or --branch NAME [--upstream BRANCH] [--harvest]\n" \
             "all take [--root DIR], fetch and publish [--remote NAME]"
 
@@ -66,15 +65,10 @@ module Riptide
       published.deleted.each { |ref| @out.puts "[riptide] deleted #{ref}" }
     end
 
-    # The branch's last six months by default, the way it merged.
     def audit(options)
       root = options[:root]
       store = Store.new(root: root, suite: options[:suite], log_dir: File.expand_path(options[:log_dir] || "tmp/riptide/#{options[:suite]}", root))
-      layout = Layout.new(root: root)
-      git = Git.new(root)
-      analyzer = Analyzer.new(layout: layout, blobs: store.method(:read_blob), load_facts: store.method(:load_facts))
-      history = Audit::History.new(git: git, analyzer: analyzer, layout: layout, branch: options[:branch] || "HEAD", since: options[:since] || "6 months ago")
-      @out.puts Audit.new(indexes: store.indexes, git: git, root: root, history: history).run
+      @out.puts Audit.new(indexes: store.indexes, git: Git.new(root), root: root).run
     end
 
     def build_of(options)
@@ -100,7 +94,6 @@ module Riptide
 
           options[:retained_runs] = value
         end
-        parser.on("--since DATE") { |value| options[:since] = value }
         parser.on("--root DIR") { |value| options[:root] = File.expand_path(value) }
       end.parse!(@argv)
       raise OptionParser::MissingArgument, "--suite" if %w[publish audit].include?(command) && !options[:suite]

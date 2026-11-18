@@ -29,9 +29,8 @@ module Riptide
   #
   # A megalith is a big test, and it's one of two shapes: steps that build
   # on each other, which split into a test per step, or one scenario, often
-  # with setup copied from its neighbors. Everything is priced by how long a
-  # test takes times how many changes in the branch's history would have
-  # picked it.
+  # with setup copied from its neighbors. Everything is measured by how
+  # long it takes a build.
   class Audit
     CHECK = /\A(assert|refute|must_|wont_)/
     # Tokens that don't change what a statement says.
@@ -43,72 +42,88 @@ module Riptide
     # Setup lines a big test has to share with its neighbors to be worth a
     # helper.
     SHARED = 5
+    # Tests the report names of a megalith's neighbors.
+    SOME = 3
 
     # +check+ is a statement written as an assertion or one that ran one,
     # like a helper's, and +mock+ one that set up a mock expectation.
-    Statement = Struct.new(:line, :source, :check, :mock, :compared, :holder, :ms, :wrote, keyword_init: true) do
+    Statement = Struct.new(:line, :source, :check, :mock, :compared, :ms, :wrote, keyword_init: true) do
       def checks? = check || mock
     end
 
     # +statements+ are the ones that ran and +written+ the whole method or
-    # block. +run+ is the run's id, +around+ it plus its sets outside the
-    # body, +span+ the body's lines, and +unseen+ whether it reads something
-    # the source doesn't hold, like a local from around it or its own name.
-    Test = Struct.new(:name, :file, :ms, :statements, :written, :index, :run, :around, :span, :unseen, :inherited_from, keyword_init: true)
+    # block. +run+ is the run's id, +span+ the body's lines, and +unseen+
+    # whether it reads something the source doesn't hold, like a local from
+    # around it or its own name.
+    Test = Struct.new(:name, :file, :ms, :statements, :written, :index, :run, :span, :unseen, :inherited_from, keyword_init: true)
 
-    Copy = Struct.new(:test, :from, :ms, :picked, keyword_init: true)
+    Copy = Struct.new(:test, :from, :ms, keyword_init: true)
     # +of+ is the test that stays.
-    Duplicate = Struct.new(:test, :of, :ms, :picked, keyword_init: true)
-    Part = Struct.new(:lines, :statements, :ms, :picked, keyword_init: true)
-    Megalith = Struct.new(:test, :shape, :statements, :checks, :ms, :picked, :parts, :saved_ms, :shared_with, :shared_lines, keyword_init: true)
+    Duplicate = Struct.new(:test, :of, :ms, keyword_init: true)
+    # A step's test runs the steps before it too, since it builds on them.
+    Part = Struct.new(:lines, :statements, :ms, keyword_init: true)
+    # +split_ms+ is what splitting adds to a build.
+    Megalith = Struct.new(:test, :shape, :statements, :checks, :ms, :parts, :split_ms, :shared_with, :shared_lines, keyword_init: true)
 
     # +outdated+ are the tests that are failing or last passed on an older
-    # version of their file.
-    Report = Struct.new(:tests, :unread, :outdated, :inherited, :duplicates, :unchecked, :megaliths, :changes, keyword_init: true) do
+    # version of their file, and +places+ where each test read starts, as
+    # { name => "file:line" }.
+    Report = Struct.new(:tests, :unread, :outdated, :inherited, :duplicates, :unchecked, :megaliths, :places, keyword_init: true) do
       def to_s(top: 25)
         skipped = [(", #{unread.size} couldn't be" if unread.any?), (", #{outdated.size} failing or changed since they passed" if outdated.any?)].join
-        out = ["#{tests} tests read#{skipped}, priced against #{changes} changes", ""]
+        out = ["#{tests} tests read#{skipped}", ""]
         heading(out, "Inherited", "tests a class runs again because it subclasses the test class they're from", inherited)
-        inherited.group_by { |copy| [copy.test.split("#").first, copy.from] }.sort_by { |_, copies| -cost(copies) }.each do |(klass, from), copies|
-          out << format("  %s inherits %d from %s: %.1fs, %.1fs over the changes", klass, copies.size, from, copies.sum(&:ms) / 1000.0, cost(copies) / 1000.0)
-          copies.sort_by(&:test).each { |copy| out << "    #{copy.test.split("#", 2).last}" }
+        inherited.group_by { |copy| [copy.test.split("#").first, copy.from] }.sort_by { |(klass, _), copies| [-copies.sum(&:ms), klass] }.each do |(klass, from), copies|
+          out << format("  %s inherits %d from %s: %.1fs", klass, copies.size, from, copies.sum(&:ms) / 1000.0)
+          copies.sort_by(&:test).each { |copy| out << "    #{places[copy.test]}  #{copy.test.split("#", 2).last}" }
         end
         heading(out << "", "Duplicates", "the same body, run the same way, checking the same values, as a test in its class that stays", duplicates)
         duplicates.each do |duplicate|
-          out << format("  %s: %.2fs, picked %d times", duplicate.test, duplicate.ms / 1000.0, duplicate.picked)
-          out << "    same as #{duplicate.of}"
+          out << format("  %s  %s: %.2fs", places[duplicate.test], duplicate.test, duplicate.ms / 1000.0)
+          out << "    same as #{places[duplicate.of]}  #{duplicate.of}"
         end
         out << "" << "Checks nothing (#{unchecked.size})"
-        unchecked.each { |name| out << "  #{name}" }
+        unchecked.each { |name| out << "  #{places[name]}  #{name}" }
         shown = megaliths.first(top)
-        out << "" << "Megaliths (#{shown.size} of #{megaliths.size}, costliest first)"
+        out << "" << "Megaliths (#{shown.size} of #{megaliths.size}, slowest first)"
         shown.each do |m|
-          out << format("  %s: %d statements, %d checks, %.2fs, picked %d times", m.test, m.statements, m.checks, m.ms / 1000.0, m.picked)
+          out << format("  %s  %s: %d statements, %d checks, %.2fs", places[m.test], m.test, m.statements, m.checks, m.ms / 1000.0)
           if m.shape == :steps
-            out << format("    %d steps that build on each other; a split costs %.1fs and names the failing step", m.parts.size, -m.saved_ms / 1000.0)
+            out << format("    %d steps that build on each other; a split adds %.1fs a build and names the failing step", m.parts.size, m.split_ms / 1000.0)
           else
             out << "    one scenario"
           end
-          out << "    shares setup lines #{m.shared_lines.join(",")} with #{m.shared_with.join(", ")}" if m.shared_with.any?
+          out << "    shares setup lines #{ranges(m.shared_lines)} with #{some(m.test, m.shared_with)}" if m.shared_with.any?
         end
         out.join("\n")
       end
 
       private
 
-      def cost(found) = found.sum { _1.ms * _1.picked }
-
       def heading(out, title, rule, found)
-        out << format("%s (%d, %.1fs a build, %.1fs over the changes): %s", title, found.size, found.sum(&:ms) / 1000.0, cost(found) / 1000.0, rule)
+        out << format("%s (%d, %.1fs a build): %s", title, found.size, found.sum(&:ms) / 1000.0, rule)
+      end
+
+      # 3, 4, 5, 9 as "3-5, 9".
+      def ranges(lines)
+        lines.sort.uniq.chunk_while { |a, b| b == a + 1 }.map { |run| run.size > 1 ? "#{run.first}-#{run.last}" : run.first.to_s }.join(", ")
+      end
+
+      # A few of +names+, by method alone when they're in +test+'s class.
+      def some(test, names)
+        klass = test.split("#").first
+        short = names.map { |name| name.split("#").first == klass ? name.split("#", 2).last : name }
+        return short.join(", ") if short.size <= SOME
+
+        "#{short.first(SOME).join(", ")} and #{short.size - SOME} more"
       end
     end
 
-    # +indexes+ are the units fetch brought. +history+ prices tests, or nil.
-    def initialize(indexes:, git:, root:, history: nil)
+    # +indexes+ are the units fetch brought.
+    def initialize(indexes:, git:, root:)
       @indexes = indexes.reject { |index| index.runs.empty? }
       @git = git
       @root = root
-      @history = history
       @models = {}
       @facts = {}
       @current = {}
@@ -122,7 +137,7 @@ module Riptide
       copies, own = tests.partition { |test| originals[test] }
       Report.new(tests: tests.size, unread: unread, outdated: outdated, inherited: inherited(copies), duplicates: duplicates(own, originals.values.compact.to_set),
                  unchecked: tests.reject { |test| test.statements.any?(&:checks?) }.map(&:name).sort,
-                 megaliths: megaliths(tests), changes: @history&.size || 0)
+                 megaliths: megaliths(tests), places: tests.to_h { |test| [test.name, "#{test.file}:#{test.span.first}"] })
     end
 
     private
@@ -178,12 +193,10 @@ module Riptide
         mock = calls.include?("expects")
         Statement.new(line: recorded.line, source: written(statement, tokens), mock: mock,
                       check: !mock && (calls.any? { |name| name.match?(CHECK) } || recorded.compared.any?),
-                      compared: recorded.compared, holder: recorded.set, ms: recorded.ms, wrote: recorded.wrote)
+                      compared: recorded.compared, ms: recorded.ms, wrote: recorded.wrote)
       end
-      own = run.body.filter_map(&:set).to_set
       span = node.location.start_line..last_line(node)
-      Test.new(name: run.test.join("#"), file: file, ms: run.ms.to_i, statements: statements, written: written(node, tokens), index: index, run: id,
-               around: [id, *run.sets.reject { |set| own.include?(set) }], span: span,
+      Test.new(name: run.test.join("#"), file: file, ms: run.ms.to_i, statements: statements, written: written(node, tokens), index: index, run: id, span: span,
                unseen: captures?(node) || reads_name?(model, run, file, span), inherited_from: run.inherited_from)
     rescue KeyError
       nil
@@ -315,7 +328,7 @@ module Riptide
     # Inherited and duplicate tests
 
     def inherited(copies)
-      copies.map { |copy| Copy.new(test: copy.name, from: copy.inherited_from, ms: copy.ms, picked: picked(copy, copy.statements.each_index)) }
+      copies.map { |copy| Copy.new(test: copy.name, from: copy.inherited_from, ms: copy.ms) }
     end
 
     # Of each set of tests in a class that are the same program, the first
@@ -325,9 +338,9 @@ module Riptide
       tests.reject(&:unseen).group_by { |test| [test.name.split("#").first, program(test)] }.values.select { |same| same.size > 1 }.flat_map do |same|
         stays, *rest = same.sort_by(&:name)
         rest.reject { |test| lent.include?(test) }.map do |test|
-          Duplicate.new(test: test.name, of: stays.name, ms: test.ms, picked: picked(test, test.statements.each_index))
+          Duplicate.new(test: test.name, of: stays.name, ms: test.ms)
         end
-      end.sort_by { |duplicate| [-duplicate.ms * duplicate.picked, -duplicate.ms, duplicate.test] }
+      end.sort_by { |duplicate| [-duplicate.ms, duplicate.test] }
     end
 
     # The test as written, which of its statements ran and what their checks
@@ -364,15 +377,15 @@ module Riptide
         next if test.statements.size < BIG
 
         megalith = Megalith.new(test: test.name, statements: test.statements.size, checks: test.statements.count(&:checks?), ms: test.ms,
-                                picked: picked(test, test.statements.each_index), shared_with: shared.dig(test.name, :with) || [],
+                                shared_with: shared.dig(test.name, :with) || [],
                                 shared_lines: shared.dig(test.name, :lines) || [])
         if (stages = steps(test)).size > 1
-          priced(megalith, test, stages.each_index.map { |k| stages[0..k].flatten })
+          split(megalith, test, stages.each_index.map { |k| stages[0..k].flatten })
         else
           megalith.shape = :scenario
         end
         megalith
-      end.sort_by { |megalith| -megalith.ms * megalith.picked }
+      end.sort_by { |megalith| [-megalith.ms, megalith.test] }
     end
 
     # Assertions that come after a write the later ones build on. A mock is
@@ -393,20 +406,14 @@ module Riptide
       stages.select { |stage| stage.any? { test.statements[_1].check } }
     end
 
-    def priced(megalith, test, parts)
+    def split(megalith, test, parts)
       megalith.shape = :steps
       around = [test.ms - test.statements.sum(&:ms), 0].max
       megalith.parts = parts.map do |indexes|
         Part.new(lines: indexes.map { test.statements[_1] }.select(&:checks?).map(&:line), statements: indexes.size,
-                 ms: around + indexes.sum { test.statements[_1].ms }, picked: picked(test, indexes))
+                 ms: around + indexes.sum { test.statements[_1].ms })
       end
-      megalith.saved_ms = megalith.picked * megalith.ms - megalith.parts.sum { |part| part.picked * part.ms }
-    end
-
-    def picked(test, indexes)
-      return 0 unless @history
-
-      @history.picks(test.index, test.around + indexes.filter_map { test.statements[_1].holder })
+      megalith.split_ms = megalith.parts.sum(&:ms) - megalith.ms
     end
 
     # Setup lines a big test has word for word with others in its file.
@@ -420,74 +427,6 @@ module Riptide
         with = others.select { |other| (mine.map(&:source) & other.statements.map(&:source)).size >= SHARED }
         lines = mine.select { |s| with.any? { |other| other.statements.any? { _1.source == s.source } } }.map(&:line)
         result[test.name] = { with: with.map(&:name).sort, lines: lines } if with.any? && lines.size >= SHARED
-      end
-    end
-
-    # The changes a branch took, run through each index the way selection
-    # runs a working tree through it: each path an index recorded, analyzed
-    # from before the change to after it, and matched to the runs and sets
-    # that recorded the part that changed.
-    class History
-      ALL = :all
-
-      def initialize(git:, analyzer:, layout:, branch:, since:)
-        @git = git
-        @analyzer = analyzer
-        @layout = layout
-        @listings = {}
-        @commits = git.output("log", "--first-parent", "--format=%H %P", "--since=#{since}", branch).lines.map(&:split).select { |_, parent| parent }
-        @hits = {}
-      end
-
-      def size = @commits.size
-
-      # How many changes reached any of +holders+, runs or sets of +index+.
-      def picks(index, holders)
-        hits = (@hits[index] ||= @commits.map { |commit, parent| hits_in(index, parent, commit) })
-        hits.count { |hit| hit == ALL || hit.intersect?(holders) }
-      end
-
-      private
-
-      def hits_in(index, parent, commit)
-        manifest = index.manifest
-        hit = Set.new
-        changed(parent, commit).each do |path, old_sha, new_sha|
-          if manifest.key?(path)
-            versions = manifest[path]
-            recorded = -> { versions.each { |version| hit.merge(index.postings(path, version)["all"]) } }
-            next recorded.call if new_sha.nil?
-
-            change = @analyzer.between(path, old_sha, new_sha)
-            next recorded.call if change.nil? || change.whole?
-            next if change.empty?
-            return ALL if change.suite?
-
-            versions.each { |version| index.changed_holders(path, version, change) { |_, _, ids| hit.merge(ids) } }
-          end
-          listed(index, path, hit) if old_sha.nil? || new_sha.nil?
-        end
-        hit
-      end
-
-      # A file added or removed changes the globs and fixture tables that
-      # list it.
-      def listed(index, path, hit)
-        (@listings[index] ||= index.manifest.keys.select { |key| key.start_with?(Env::GLOB, Env::FIXTURES) }).each do |key|
-          matches = if key.start_with?(Env::GLOB) then File.fnmatch?(key.delete_prefix(Env::GLOB), path, File::FNM_PATHNAME | File::FNM_EXTGLOB)
-                    elsif key.start_with?(Env::FIXTURES) then @layout.fixture?(path) && @layout.fixture_table(path, "") == key.delete_prefix(Env::FIXTURES)
-                    end
-          index.manifest[key].each { |version| hit.merge(index.postings(key, version)["all"]) } if matches
-        end
-      end
-
-      # [path, sha before, sha after] for each file +commit+ changed, nil for
-      # a side the file isn't on.
-      def changed(parent, commit)
-        @git.output("diff-tree", "-r", "-z", "--no-renames", "--relative", parent, commit).split("\0").each_slice(2).map do |meta, path|
-          _, _, old_sha, new_sha = meta.delete_prefix(":").split
-          [path, old_sha.match?(/\A0+\z/) ? nil : old_sha, new_sha.match?(/\A0+\z/) ? nil : new_sha]
-        end
       end
     end
   end

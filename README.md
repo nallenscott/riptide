@@ -153,15 +153,15 @@ Each runs ref holds an index from file versions to the runs that used each part 
 
 ```bash
 bundle exec riptide fetch --branch main
-bundle exec riptide audit --suite unit --branch origin/main --since "6 months ago"
+bundle exec riptide audit --suite unit
 ```
 
 - **Inherited:** tests a class runs again because it subclasses the test class they're from, like a class nested inside another to group its tests. A base class's test that only its subclasses run is theirs.
 - **Duplicates:** the same program as a test in its class that stays. Its method or block is the same token for token, so spacing and comments don't count but parameters, strings, heredocs and rescues do. It ran the same lines everywhere outside its body, setup included, and its checks compared the same values. Tests in different classes never count, since a class's settings can change what the same body does without running a line. Neither does a test that reads something the source doesn't hold, like a local from around its body in a loop or its own name, or a test a subclass inherits, since deleting it deletes theirs.
 - **Checks nothing:** a test whose body ran no assertion or mock expectation.
-- **Megaliths:** tests of 15 statements or more, costliest first. Each is either steps that build on each other, which split into a test per step, or one scenario, with the setup lines it shares word for word with other tests in its file.
+- **Megaliths:** tests of 15 statements or more, slowest first. Each is either steps that build on each other, which split into a test per step, or one scenario, with the setup lines it shares word for word with other tests in its file. A split makes the build slower, since each step's test runs the setup and the steps before it again, but a failure names the step that broke.
 
-Everything is priced by how long a test takes times how many of the branch's changes would have picked it, through the same matching selection uses. Past versions of a file have no load facts, and there's no app to ask whether a new method takes over a call, so pricing assumes it might.
+Each test is listed with the file and line it starts on, and each section adds up what its tests take a build.
 
 ## Development
 
