@@ -61,10 +61,6 @@ module Riptide
             { "test" => entry[:test], "reason" => entry[:reason], "change" => KINDS.fetch(entry[:kind]), "through" => entry[:via] && VIA.fetch(entry[:via]) }.compact
           end }
       end
-
-      def self.full(tests, cause)
-        new(mode: :full, total: tests.size, selected: tests.map { |test| { test: test, reason: cause.reason, kind: cause.kind, via: cause.via } })
-      end
     end
 
     # +indexes+ hold the recorded runs and open failures, from every unit
@@ -79,7 +75,7 @@ module Riptide
       @tests = tests
       @pseudo = pseudo
       @current = {}
-      @suite_cause = nil
+      @top_level = {}
     end
 
     # { index => { run id => Cause } } for the runs that don't hold here,
@@ -88,10 +84,7 @@ module Riptide
 
     def select
       @hits = @indexes.to_h { |index| [index, hits_in(index)] }
-      if @suite_cause
-        @hits = @indexes.to_h { |index| [index, index.run_ids.to_h { |id| [id, @suite_cause] }] }
-        return Decision.full(@tests, @suite_cause) unless @tests.empty?
-      end
+      @top_level.each { |path, cause| hit_all_but_current(path, cause) }
 
       selected = @tests.filter_map do |test|
         cause = cause_to_run(test)
@@ -131,7 +124,6 @@ module Riptide
           changed(index, path, version, current) do |reason, kind, reached|
             reached.each { |id, via| hits[id] ||= Cause.new(reason, kind, via) }
           end
-          return hits if @suite_cause
         end
       end
       hits
@@ -153,7 +145,10 @@ module Riptide
       change = @analyzer.change(path, version)
       return yield("#{path} changed, and the recorded version isn't in this repository", :deleted, recorded.call) if change.nil?
       return if change.empty?
-      return suite(Cause.new("#{path} changed top-level code", :boot)) if change.suite?
+      if change.suite?
+        @top_level[path] ||= Cause.new("#{path} changed top-level code", :boot)
+        return yield(@top_level[path].reason, :boot, recorded.call)
+      end
       return yield("#{path} changed as a whole", ruby?(path) ? :code : whole_kind(path), recorded.call) if change.whole?
 
       runs = nil
@@ -194,8 +189,16 @@ module Riptide
       @shared_names ||= @tests.tally.filter_map { |test, count| test if count > 1 }.to_set
     end
 
-    def suite(cause)
-      @suite_cause ||= cause
+    # Top-level code runs at boot, so a change to it reaches every test, even
+    # one whose run never recorded the file. A run recorded against the file
+    # as it is now saw that code, so it still holds unless it also recorded
+    # an older version.
+    def hit_all_but_current(path, cause)
+      current = current_sha(path)
+      @indexes.each do |index|
+        saw = index.manifest.fetch(path, []).include?(current) ? index.reach(index.postings(path, current)["all"]) : {}
+        index.run_ids.each { |id| @hits[index][id] ||= cause unless saw.key?(id) }
+      end
     end
 
     def current_sha(path)

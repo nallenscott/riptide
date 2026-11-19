@@ -284,6 +284,22 @@ module Riptide
       end
     end
 
+    # A run from before the change no longer holds, but one recorded against
+    # the file as it is now saw the new code at boot.
+    def test_a_run_recorded_after_a_top_level_change_still_holds
+      with_widget do
+        write_and_commit(@root, "test/test_helper.rb", "require 'minitest'\n", message: "helper")
+        before = Diff.blob_sha(File.join(@root, "test/test_helper.rb"))
+        record(env: { "test/test_helper.rb" => { "sha" => before } })
+        File.write(File.join(@root, "test/test_helper.rb"), "require 'minitest/autorun'\n")
+        after = Diff.blob_sha(File.join(@root, "test/test_helper.rb"))
+        record(at: 2.0, env: { "test/test_helper.rb" => { "sha" => after } })
+        record({ "methods" => ["Widget#other"] }, test: %w[WidgetTest test_other], env: { "test/test_helper.rb" => { "sha" => before } })
+
+        assert_equal ["test/test_helper.rb changed top-level code"], reasons([TEST, %w[WidgetTest test_other]])
+      end
+    end
+
     # Rails sets default_internal to UTF-8, which makes writing raw bytes to a
     # text file convert them.
     def test_files_with_non_ascii_content_are_compared_as_text

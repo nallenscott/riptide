@@ -208,10 +208,15 @@ module Riptide
       end
 
       # The selection worked out run by run: a test runs when it has an open
-      # failure anywhere, or no passing run that still holds.
+      # failure anywhere, or no passing run that still holds. A file whose
+      # top-level code changed reaches every run that didn't record it as
+      # it is now.
       def expected
-        runs = @models.flat_map { |model| model.runs.values.flatten(1).map { |_, run| [run, hit?(model, run)] } }
-        return @tests.sort if runs.any? { |_, hit| hit == :suite }
+        runs = @models.flat_map { |model| model.runs.values.flatten(1).map { |_, run| [run, run.sets.map { |id| model.set(id) } << run] } }
+        top = runs.flat_map { |_, groups| groups.flat_map { |holder| holder.files.filter_map { |path, facets| path if top_level?(path, facets["sha"]) } } }.uniq
+        runs = runs.map do |run, groups|
+          [run, hit?(groups) || top.any? { |path| groups.none? { |holder| holder.files.dig(path, "sha") == current(path) } }]
+        end
 
         @tests.select do |test|
           next true if @marks.any? { |marks| marks.key?(test) }
@@ -254,11 +259,14 @@ module Riptide
         [files, constants]
       end
 
-      def hit?(model, run)
-        groups = run.sets.map { |id| model.set(id) } << run
+      def hit?(groups)
         read = groups.flat_map { |holder| holder.constants.to_a }.to_set
-        results = groups.flat_map { |holder| holder.files.map { |path, facets| file_hit(path, facets, read) } }
-        results.include?(:suite) ? :suite : results.any?
+        groups.any? { |holder| holder.files.any? { |path, facets| file_hit(path, facets, read) } }
+      end
+
+      def top_level?(path, sha)
+        current = current(path)
+        !Env.pseudo?(path) && current && current != sha && change(path, sha)&.suite?
       end
 
       def current(path) = path.start_with?(Env::GLOB) ? @listing : (Env.constant?(path) ? Env.presence(path) : @current[path])
@@ -271,7 +279,7 @@ module Riptide
         change = change(path, facets["sha"])
         return true if change.nil?
         return false if change.empty?
-        return :suite if change.suite?
+        return true if change.suite?
         return true if change.whole? || facets["whole"]
         return true if Index::FACETS.any? { |facet| facets[facet]&.any? { |name| change.public_send(facet).include?(name) } }
 
