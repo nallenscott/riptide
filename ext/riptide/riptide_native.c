@@ -31,6 +31,27 @@
 #include "ruby/debug.h"
 #include <time.h>
 
+// Where the fields the tracer reads live on the Ruby it's built for.
+#ifdef HAVE_RB_CONTROL_FRAME_T__ISEQ
+#define FRAME_ISEQ(cfp) ((cfp)->_iseq)
+#else
+#define FRAME_ISEQ(cfp) ((cfp)->iseq)
+#endif
+
+#ifdef HAVE_STRUCT_RB_ISEQ_CONSTANT_BODY_INSNS_INFO_POSITIONS_OR_SUCC_INDEX_TABLE
+#define INFO_POSITIONS(body) ((body)->insns_info.positions_or_succ_index_table.positions)
+#define INFO_SUCC_INDEX(body) ((body)->insns_info.positions_or_succ_index_table.succ_index_table)
+#else
+#define INFO_POSITIONS(body) ((body)->insns_info.positions)
+#define INFO_SUCC_INDEX(body) ((body)->insns_info.succ_index_table)
+#endif
+
+#ifdef HAVE_EMBEDDED_TARGETED_HOOKS
+#define TARGETED_HOOKS(ractor) (&(ractor)->pub.targeted_hooks)
+#else
+#define TARGETED_HOOKS(ractor) ((ractor)->pub.targeted_hooks)
+#endif
+
 // Words per instruction, by opcode.
 extern const uint8_t rb_vm_insn_len_info[];
 
@@ -185,7 +206,7 @@ body_open(VALUE stack, rb_trace_arg_t *arg)
     if (frame_depth(arg) < depth) return 0;
 
     const rb_control_frame_t *cfp = RUBY_VM_END_CONTROL_FRAME(arg->ec) - depth;
-    return (VALUE)cfp->iseq == rb_ary_entry(stack, -1);
+    return (VALUE)FRAME_ISEQ(cfp) == rb_ary_entry(stack, -1);
 }
 
 // The thread's class bodies, without the ones it left with no end event.
@@ -224,7 +245,7 @@ on_class(VALUE klass, VALUE relative, rb_trace_arg_t *arg)
     VALUE stack = current_stack(1);
     rb_ary_push(stack, klass);
     rb_ary_push(stack, LONG2FIX(frame_depth(arg)));
-    rb_ary_push(stack, (VALUE)arg->cfp->iseq);
+    rb_ary_push(stack, (VALUE)FRAME_ISEQ(arg->cfp));
     loading++;
 
     if (RB_TYPE_P(klass, T_CLASS) && FL_TEST(klass, FL_SINGLETON)) {
@@ -473,14 +494,12 @@ static unsigned int *
 info_positions(const struct rb_iseq_constant_body *body)
 {
     int size = (int)body->insns_info.size;
-    int max_pos = (int)body->iseq_size;
     unsigned int *positions = ALLOC_N(unsigned int, size);
-    if (body->insns_info.positions) {
-        MEMCPY(positions, body->insns_info.positions, unsigned int, size);
-        return positions;
-    }
-
-    const struct succ_index_table *sd = body->insns_info.succ_index_table;
+#if VM_INSN_INFO_TABLE_IMPL != 2
+    MEMCPY(positions, INFO_POSITIONS(body), unsigned int, size);
+#else
+    int max_pos = (int)body->iseq_size;
+    const struct succ_index_table *sd = INFO_SUCC_INDEX(body);
     const int imm_size = (max_pos < IMMEDIATE_TABLE_SIZE ? max_pos + 8 : IMMEDIATE_TABLE_SIZE) / 9;
     const int succ_size = (max_pos < IMMEDIATE_TABLE_SIZE ? 0 : (max_pos - IMMEDIATE_TABLE_SIZE + 511)) / 512;
     unsigned int *p = positions;
@@ -499,6 +518,7 @@ info_positions(const struct rb_iseq_constant_body *body)
             }
         }
     }
+#endif
     return positions;
 }
 
@@ -573,7 +593,7 @@ tracer_target(VALUE self, VALUE iseqw, VALUE relative)
     rb_ractor_t *ractor = current_ractor();
     st_data_t existing;
     rb_hook_list_t *list = NULL;
-    if (st_lookup(ractor->pub.targeted_hooks, (st_data_t)iseq, &existing)) {
+    if (st_lookup(TARGETED_HOOKS(ractor), (st_data_t)iseq, &existing)) {
         list = (rb_hook_list_t *)existing;
         for (hook_t *h = (hook_t *)list->hooks; h; h = h->next) {
             if (h->func == (rb_event_hook_func_t)hook) return Qfalse;
@@ -603,7 +623,7 @@ tracer_target(VALUE self, VALUE iseqw, VALUE relative)
     if (!list) {
         list = ZALLOC(rb_hook_list_t);
         list->type = hook_list_type_targeted_iseq;
-        st_insert(ractor->pub.targeted_hooks, (st_data_t)iseq, (st_data_t)list);
+        st_insert(TARGETED_HOOKS(ractor), (st_data_t)iseq, (st_data_t)list);
     }
     probes->hooks = list;
     h->next = (hook_t *)list->hooks;
@@ -635,10 +655,12 @@ tracer_target(VALUE self, VALUE iseqw, VALUE relative)
     }
 
 #if USE_YJIT || USE_ZJIT
-    // The interpreter hands an iseq to a JIT at a call count it can no
-    // longer reach, so probes that come back are always heard.
-    body->jit_entry_calls = ULONG_MAX / 2;
-    body->jit_exception_calls = ULONG_MAX / 2;
+    // The interpreter hands an iseq to a JIT when its call count hits a
+    // threshold, and compiled app code would only bail out at the armed entry
+    // probe on every call. Half the counter's range, whatever its width, keeps
+    // the count far from the threshold.
+    body->jit_entry_calls = (__typeof__(body->jit_entry_calls))-1 / 2;
+    body->jit_exception_calls = (__typeof__(body->jit_exception_calls))-1 / 2;
 #endif
     return Qtrue;
 }

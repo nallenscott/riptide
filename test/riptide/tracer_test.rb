@@ -585,6 +585,33 @@ module Riptide
       assert_equal 0, result[:invalidations]
     end
 
+    # YJIT would only bail out at a traced method's entry probe, so it never
+    # compiles it. The same method outside the app compiles on its first call.
+    def test_yjit_leaves_traced_methods_alone
+      skip "this Ruby has no YJIT" unless defined?(RubyVM::YJIT)
+
+      result = in_yjit(<<~RUBY)
+        outside = File.realpath(Dir.mktmpdir)
+        File.write("\#{root}/traced.rb", "module Traced; def self.go(n) = n + 1; end\\n")
+        File.write("\#{outside}/untraced.rb", "module Untraced; def self.go(n) = n + 1; end\\n")
+        load "\#{root}/traced.rb"
+        load "\#{outside}/untraced.rb"
+        yjit = RubyVM::YJIT
+        before = yjit.runtime_stats[:compiled_iseq_count]
+        Traced.go(1)
+        Traced.go(1)
+        Traced.go(1)
+        traced = yjit.runtime_stats[:compiled_iseq_count] - before
+        before = yjit.runtime_stats[:compiled_iseq_count]
+        Untraced.go(1)
+        Untraced.go(1)
+        Untraced.go(1)
+        { traced: traced, untraced: yjit.runtime_stats[:compiled_iseq_count] - before }
+      RUBY
+
+      assert_equal({ traced: 0, untraced: 1 }, result)
+    end
+
     def test_line_coverage_counts_every_run_alongside_the_tracer
       result = in_subprocess(<<~RUBY)
         require "coverage"
