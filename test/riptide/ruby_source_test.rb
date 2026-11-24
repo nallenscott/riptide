@@ -17,12 +17,26 @@ module Riptide
       found
     end
 
+    # What Ruby's build generates each header from. A Ruby that checks one of
+    # them in has no template for it.
+    TEMPLATES = {
+      "id.h" => "template/id.h.tmpl",
+      "prism/ast.h" => "prism/templates/include/prism/ast.h.erb",
+      "prism/diagnostic.h" => "prism/templates/include/prism/diagnostic.h.erb"
+    }.freeze
+
+    # The headers riptide generates that this Ruby's build generates too.
+    def generated
+      RubySource::GENERATED.keys.select { |header| File.exist?(File.join(tree, TEMPLATES.fetch(header))) }
+    end
+
     # The files in +tree+ that riptide checks out: everything under PATHS
     # but the headers Ruby's build generates.
     def kept_files
       dirs, files = RubySource::PATHS.map { |path| path.delete_prefix("/") }.partition { |path| path.end_with?("/") }
+      headers = generated
       Dir.glob("**/*", base: tree).select do |f|
-        File.file?(File.join(tree, f)) && !RubySource::GENERATED.key?(f) &&
+        File.file?(File.join(tree, f)) && !headers.include?(f) &&
           (dirs.any? { |dir| f.start_with?(dir) } || files.any? { |glob| File.fnmatch?(glob, f, File::FNM_PATHNAME) })
       end
     end
@@ -124,8 +138,8 @@ module Riptide
         with_bare_tree(dir) do |bare|
           dirs = RubySource.include_dirs(bare)
           assert_equal [bare, File.expand_path("ruby-generated")], dirs
-          RubySource::GENERATED.each_key { |header| assert_equal File.binread(File.join(tree, header)), File.binread(File.join(dirs.last, header)), header }
-          RubySource::GENERATED.each_key { |header| refute File.exist?(File.join(bare, header)), header }
+          generated.each { |header| assert_equal File.binread(File.join(tree, header)), File.binread(File.join(dirs.last, header)), header }
+          generated.each { |header| refute File.exist?(File.join(bare, header)), header }
         end
       end
     end

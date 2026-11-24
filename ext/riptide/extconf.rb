@@ -30,11 +30,17 @@ begin
 
   RubySource.include_dirs.each { |dir| $INCFLAGS << " -I#{dir}" }
   $CFLAGS << " -Wno-unused-function -Wno-unused-parameter"
+  # Fields the tracer reads that Ruby 4.1 renamed or moved.
+  have_struct_member("rb_control_frame_t", "_iseq", "vm_core.h")
+  have_struct_member("struct rb_iseq_constant_body", "insns_info.positions_or_succ_index_table", "vm_core.h")
+  if checking_for("embedded targeted_hooks") { try_static_assert("__builtin_types_compatible_p(__typeof__(((rb_ractor_t *)0)->pub.targeted_hooks), st_table)", "ractor_core.h") }
+    $defs.push("-DHAVE_EMBEDDED_TARGETED_HOOKS")
+  end
   # A struct that moved in a patch release, or a function this Ruby doesn't
   # export, turns riptide off, not the install. Only linking catches the
   # second, since the extension loads fine and dies when the tracer calls it.
   source = File.read(File.join(__dir__, "riptide_native.c")).sub(%(#include "riptide_build.h"\n), "")
-  unless try_link(source + MAIN_DOES_NOTHING)
+  unless with_cppflags("#$CPPFLAGS #{$defs.join(" ")}") { try_link(source + MAIN_DOES_NOTHING) }
     errors = compiler_errors
     warn "riptide's tracer didn't compile:\n#{errors.join}" if errors.any?
     raise "the tracer doesn't build against Ruby #{RUBY_VERSION}"

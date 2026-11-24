@@ -47,6 +47,10 @@ module Riptide
         @preloaded = ($LOADED_FEATURES + [caller].compact).uniq.filter_map do |path|
           prefixes.find { |prefix| path.start_with?(prefix) }&.then { |prefix| path.delete_prefix(prefix) }
         end
+        # Looked up out here, since YJIT throws away the compiled hook when
+        # the first app file fills a constant cache inside it.
+        # https://github.com/ruby/ruby/commit/91ae69860591f0dfc85571cfbd023dd199e17e73
+        file = File
         @compile_hook = TracePoint.new(:script_compiled) do |tp|
           iseq = tp.instruction_sequence
           path = iseq.absolute_path || iseq.path
@@ -55,7 +59,7 @@ module Riptide
 
           relative = path.delete_prefix(prefix).freeze
           target(iseq, relative)
-          stat = File.stat(path) rescue next
+          stat = file.stat(path) rescue next
           @compiled[relative] ||= [stat.mtime.to_r, stat.size]
         end
         @compile_hook.enable
